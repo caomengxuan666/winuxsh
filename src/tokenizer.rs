@@ -16,6 +16,9 @@ pub enum Token {
     RedirOut,       // >
     RedirAppend,    // >>
     RedirErr,       // 2>
+    RedirErrAppend, // 2>>
+    RedirErrToOut,  // 2>&1
+    RedirOutToErr,  // 1>&2 or >&2
     Wildcard(String),   // Wildcard pattern
     CommandSubst(String), // Command substitution
     ArrayStart,     // (
@@ -30,6 +33,9 @@ pub struct CommandInfo {
     pub stdout_redir: Option<String>,
     pub stderr_redir: Option<String>,
     pub stdout_append: bool,
+    pub stderr_append: bool,
+    pub stderr_to_stdout: bool,
+    pub stdout_to_stderr: bool,
     pub background: bool,
 }
 
@@ -41,6 +47,9 @@ impl Default for CommandInfo {
             stdout_redir: None,
             stderr_redir: None,
             stdout_append: false,
+            stderr_append: false,
+            stderr_to_stdout: false,
+            stdout_to_stderr: false,
             background: false,
         }
     }
@@ -139,33 +148,89 @@ impl Tokenizer {
                     tokens.push(Token::Word(current.trim().to_string()));
                     current.clear();
                 }
-                // Check for >>
+                // Check for >>, >&2
                 if let Some(&next_ch) = chars_iter.peek() {
                     if next_ch == '>' {
                         chars_iter.next(); // Consume second >
                         tokens.push(Token::RedirAppend);
+                    } else if next_ch == '&' {
+                        chars_iter.next(); // Consume &
+                        if let Some(&fd_ch) = chars_iter.peek() {
+                            if fd_ch == '2' {
+                                chars_iter.next(); // Consume 2
+                                tokens.push(Token::RedirOutToErr);
+                            } else {
+                                tokens.push(Token::RedirOut);
+                                tokens.push(Token::Background);
+                                current.push(fd_ch);
+                                chars_iter.next();
+                            }
+                        } else {
+                            tokens.push(Token::RedirOut);
+                            tokens.push(Token::Background);
+                        }
                     } else {
                         tokens.push(Token::RedirOut);
                     }
                 } else {
                     tokens.push(Token::RedirOut);
                 }
-            } else if ch == '2' {
-                // Check for 2>
-                if let Some(&next_ch) = chars_iter.peek() {
-                    if next_ch == '>' {
-                        if !current.trim().is_empty() {
-                            tokens.push(Token::Word(current.trim().to_string()));
-                            current.clear();
+            } else if ch == '1' || ch == '2' {
+                // File-descriptor-prefixed redirection: 1>, 1>>, 1>&2, 2>, 2>>, 2>&1
+                if current.is_empty() {
+                    if let Some(&next_ch) = chars_iter.peek() {
+                        if next_ch == '>' {
+                            chars_iter.next(); // consume >
+                            if let Some(&after_ch) = chars_iter.peek() {
+                                if after_ch == '>' {
+                                    chars_iter.next(); // consume second >
+                                    if ch == '2' {
+                                        tokens.push(Token::RedirErrAppend);
+                                    } else {
+                                        tokens.push(Token::RedirAppend);
+                                    }
+                                } else if after_ch == '&' {
+                                    chars_iter.next(); // consume &
+                                    if let Some(&fd_ch) = chars_iter.peek() {
+                                        if ch == '2' && fd_ch == '1' {
+                                            chars_iter.next(); // consume 1
+                                            tokens.push(Token::RedirErrToOut);
+                                        } else if ch == '1' && fd_ch == '2' {
+                                            chars_iter.next(); // consume 2
+                                            tokens.push(Token::RedirOutToErr);
+                                        } else {
+                                            // Fallback: keep best-effort behavior.
+                                            if ch == '2' {
+                                                tokens.push(Token::RedirErr);
+                                            } else {
+                                                tokens.push(Token::RedirOut);
+                                            }
+                                            tokens.push(Token::Background);
+                                            current.push(fd_ch);
+                                            chars_iter.next();
+                                        }
+                                    } else if ch == '2' {
+                                        tokens.push(Token::RedirErr);
+                                        tokens.push(Token::Background);
+                                    } else {
+                                        tokens.push(Token::RedirOut);
+                                        tokens.push(Token::Background);
+                                    }
+                                } else if ch == '2' {
+                                    tokens.push(Token::RedirErr);
+                                } else {
+                                    tokens.push(Token::RedirOut);
+                                }
+                            } else if ch == '2' {
+                                tokens.push(Token::RedirErr);
+                            } else {
+                                tokens.push(Token::RedirOut);
+                            }
+                            continue;
                         }
-                        chars_iter.next(); // Consume >
-                        tokens.push(Token::RedirErr);
-                    } else {
-                        current.push(ch);
                     }
-                } else {
-                    current.push(ch);
                 }
+                current.push(ch);
             } else if ch == '(' {
                 if !current.trim().is_empty() {
                     tokens.push(Token::Word(current.trim().to_string()));
@@ -206,11 +271,7 @@ impl Tokenizer {
         while i < tokens.len() {
             match &tokens[i] {
                 Token::Word(s) => {
-                    // Check for 2>
-                    if s == "2" && i + 1 < tokens.len() && tokens[i + 1] == Token::RedirOut {
-                        processed_tokens.push(Token::RedirErr);
-                        i += 2;
-                    } else if s == "&" && i + 1 < tokens.len() && tokens[i + 1] == Token::And {
+                    if s == "&" && i + 1 < tokens.len() && tokens[i + 1] == Token::And {
                         processed_tokens.push(Token::Background);
                         i += 2;
                     } else if s == ">" && i + 1 < tokens.len() && tokens[i + 1] == Token::RedirOut {
@@ -287,6 +348,27 @@ mod tests {
         let tokens = Tokenizer::tokenize("cmd 2> error.txt").unwrap();
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[1], Token::RedirErr);
+    }
+
+    #[test]
+    fn test_tokenize_error_redirect_append() {
+        let tokens = Tokenizer::tokenize("cmd 2>> error.txt").unwrap();
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1], Token::RedirErrAppend);
+    }
+
+    #[test]
+    fn test_tokenize_stderr_to_stdout() {
+        let tokens = Tokenizer::tokenize("cmd 2>&1").unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1], Token::RedirErrToOut);
+    }
+
+    #[test]
+    fn test_tokenize_stdout_to_stderr() {
+        let tokens = Tokenizer::tokenize("cmd 1>&2").unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1], Token::RedirOutToErr);
     }
 
     #[test]

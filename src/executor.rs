@@ -3,6 +3,7 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::fs::File;
 use std::process::{Command, Stdio};
 
 use crate::error::{Result, ShellError};
@@ -76,17 +77,59 @@ impl Executor {
             command.stdin(Stdio::from(file));
         }
 
+        let mut stdout_handle: Option<File> = None;
+        let mut stderr_handle: Option<File> = None;
+
         if let Some(ref stdout_file) = cmd_info.stdout_redir {
             let file = if cmd_info.stdout_append {
-                std::fs::OpenOptions::new().append(true).create(true).open(stdout_file)?
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(stdout_file)?
             } else {
-                std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(stdout_file)?
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(stdout_file)?
             };
-            command.stdout(Stdio::from(file));
+            stdout_handle = Some(file);
         }
 
         if let Some(ref stderr_file) = cmd_info.stderr_redir {
-            let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(stderr_file)?;
+            let file = if cmd_info.stderr_append {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(stderr_file)?
+            } else {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(stderr_file)?
+            };
+            stderr_handle = Some(file);
+        }
+
+        // Descriptor duplication (best-effort for 2>&1 and 1>&2).
+        if cmd_info.stderr_to_stdout {
+            if let Some(ref out_file) = stdout_handle {
+                stderr_handle = Some(out_file.try_clone()?);
+            }
+        }
+
+        if cmd_info.stdout_to_stderr {
+            if let Some(ref err_file) = stderr_handle {
+                stdout_handle = Some(err_file.try_clone()?);
+            }
+        }
+
+        if let Some(file) = stdout_handle {
+            command.stdout(Stdio::from(file));
+        }
+
+        if let Some(file) = stderr_handle {
             command.stderr(Stdio::from(file));
         }
 
