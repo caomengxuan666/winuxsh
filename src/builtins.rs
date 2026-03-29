@@ -1,13 +1,13 @@
 // Built-in commands for WinSH
+use crate::array::ArrayValue;
+use crate::error::{Result, ShellError};
+use crate::job::JobStatus;
+use crate::oh_my_winuxsh::OhMyWinuxsh;
+use crate::plugin::Plugin;
+use crate::shell::Shell;
+use colored::Colorize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use crate::error::{Result, ShellError};
-use crate::shell::Shell;
-use crate::array::ArrayValue;
-use crate::job::JobStatus;
-use colored::Colorize;
-use crate::plugin::Plugin;
-use crate::oh_my_winuxsh::OhMyWinuxsh;
 
 /// Built-in command handler
 impl Shell {
@@ -22,7 +22,11 @@ impl Shell {
                 let dir_str = if args.len() > 1 {
                     args[1].clone()
                 } else {
-                    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).to_str().unwrap().to_string()
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .to_str()
+                        .unwrap()
+                        .to_string()
                 };
 
                 let new_dir = if dir_str == "~" {
@@ -32,7 +36,10 @@ impl Shell {
                 };
 
                 if let Err(e) = std::env::set_current_dir(&new_dir) {
-                    return Some(Err(ShellError::InvalidCommand(format!("cd: {} - {}", dir_str, e))));
+                    return Some(Err(ShellError::InvalidCommand(format!(
+                        "cd: {} - {}",
+                        dir_str, e
+                    ))));
                 }
 
                 self.current_dir = std::env::current_dir().unwrap();
@@ -47,6 +54,7 @@ impl Shell {
                 println!("{}", output);
                 Some(Ok(()))
             }
+            "true" => Some(Ok(())),
             "exit" | "quit" => {
                 std::process::exit(0);
             }
@@ -60,7 +68,8 @@ impl Shell {
                     let arg = &args[1];
                     if arg.contains('=') {
                         if let Some((key, value)) = arg.split_once('=') {
-                            self.env_vars.insert(key.to_string(), ArrayValue::String(value.to_string()));
+                            self.env_vars
+                                .insert(key.to_string(), ArrayValue::String(value.to_string()));
                         }
                     }
                 }
@@ -71,7 +80,8 @@ impl Shell {
                     let arg = &args[1];
                     if arg.contains('=') {
                         if let Some((key, value)) = arg.split_once('=') {
-                            self.env_vars.insert(key.to_string(), ArrayValue::String(value.to_string()));
+                            self.env_vars
+                                .insert(key.to_string(), ArrayValue::String(value.to_string()));
                             std::env::set_var(key, value);
                         }
                     }
@@ -180,8 +190,13 @@ impl Shell {
                 if args.len() > 2 {
                     let array_name = &args[1];
                     let elements: Vec<String> = args[2..].to_vec();
-                    self.env_vars.insert(array_name.to_string(), ArrayValue::Array(elements));
-                    println!("Array '{}' defined with {} elements", array_name, args.len() - 2);
+                    self.env_vars
+                        .insert(array_name.to_string(), ArrayValue::Array(elements));
+                    println!(
+                        "Array '{}' defined with {} elements",
+                        array_name,
+                        args.len() - 2
+                    );
                 }
             }
             "get" => {
@@ -239,7 +254,8 @@ impl Shell {
                 JobStatus::Done => "Done".blue(),
             };
 
-            println!("{}  {}  {}  {}",
+            println!(
+                "{}  {}  {}  {}",
                 format!("[{}]", job.id).cyan(),
                 job.pid,
                 status_str,
@@ -264,7 +280,11 @@ impl Shell {
         let job_id = match job_id {
             Ok(id) => id,
             Err(_) => {
-                eprintln!("{} {}", "fg:".red(), format!("Invalid job number '{}'", args[0]));
+                eprintln!(
+                    "{} {}",
+                    "fg:".red(),
+                    format!("Invalid job number '{}'", args[0])
+                );
                 return;
             }
         };
@@ -300,7 +320,11 @@ impl Shell {
         let job_id = match job_id {
             Ok(id) => id,
             Err(_) => {
-                eprintln!("{} {}", "bg:".red(), format!("Invalid job number '{}'", args[0]));
+                eprintln!(
+                    "{} {}",
+                    "bg:".red(),
+                    format!("Invalid job number '{}'", args[0])
+                );
                 return;
             }
         };
@@ -315,7 +339,11 @@ impl Shell {
 
         if let Some(job) = self.job_manager.get_job_mut(job_id) {
             job.set_status(JobStatus::Running);
-            println!("{} {}", "Continue background job:".cyan(), format!("[{}]", job.id));
+            println!(
+                "{} {}",
+                "Continue background job:".cyan(),
+                format!("[{}]", job.id)
+            );
         }
     }
 
@@ -403,10 +431,14 @@ impl Shell {
     /// Print command history
     fn print_history(&self) {
         if let Ok(history) = std::fs::read_to_string(&self.history_path) {
-            let lines: Vec<String> = history.lines()
-                .map(|l| l.trim_matches(|c: char| {
-                    c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace()
-                }).to_string())
+            let lines: Vec<String> = history
+                .lines()
+                .map(|l| {
+                    l.trim_matches(|c: char| {
+                        c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace()
+                    })
+                    .to_string()
+                })
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .collect();
 

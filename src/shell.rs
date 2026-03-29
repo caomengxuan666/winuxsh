@@ -1,22 +1,23 @@
+use colored::Colorize;
+use reedline::{
+    default_emacs_keybindings, ColumnarMenu, DefaultCompleter, DefaultPrompt, DefaultPromptSegment,
+    Emacs, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent,
+    ReedlineMenu,
+};
 use std::collections::HashMap;
 use std::env;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use reedline::{Reedline, FileBackedHistory, DefaultCompleter, ColumnarMenu,
-               ReedlineMenu, DefaultPrompt, DefaultPromptSegment, Emacs,
-               KeyCode, KeyModifiers, ReedlineEvent, default_emacs_keybindings,
-               MenuBuilder};
-use colored::Colorize;
 
-use crate::error::{Result, ShellError};
 use crate::array::ArrayValue;
 use crate::config::ShellConfig;
-use crate::plugin::PluginManager;
-use crate::job::JobManager;
-use crate::tokenizer::{Tokenizer, ParsedCommand, CommandInfo};
-use crate::parser::Parser;
+use crate::error::{Result, ShellError};
 use crate::executor::Executor;
+use crate::job::JobManager;
+use crate::parser::Parser;
+use crate::plugin::PluginManager;
 use crate::theme::ThemePlugin;
+use crate::tokenizer::{CommandInfo, ParsedCommand, Tokenizer};
 use glob;
 
 /// Main shell structure
@@ -33,6 +34,43 @@ pub struct Shell {
     pub last_exit_code: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptFlow {
+    None,
+    Break,
+    Continue,
+}
+
+#[derive(Debug, Default)]
+struct ScriptState {
+    positional: Vec<String>,
+    locals: HashMap<String, String>,
+}
+
+impl ScriptState {
+    fn new(args: &[String]) -> Self {
+        Self {
+            positional: args.to_vec(),
+            locals: HashMap::new(),
+        }
+    }
+
+    fn shift(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        if n >= self.positional.len() {
+            self.positional.clear();
+            return;
+        }
+        self.positional.drain(0..n);
+    }
+
+    fn positional(&self, index: usize) -> Option<&str> {
+        self.positional.get(index).map(|s| s.as_str())
+    }
+}
+
 impl Shell {
     /// Create a new shell instance
     pub fn new(load_config: bool) -> Result<Self> {
@@ -42,7 +80,7 @@ impl Shell {
         // Get commands from PATH for completion
         fn get_path_commands() -> Vec<String> {
             let mut commands = Vec::new();
-            
+
             if let Ok(path_env) = std::env::var("PATH") {
                 for path in env::split_paths(&path_env) {
                     if let Ok(entries) = std::fs::read_dir(path) {
@@ -51,18 +89,19 @@ impl Shell {
                                 if file_type.is_file() {
                                     let file_name = entry.file_name().to_string_lossy().to_string();
                                     // Check if it's executable by extension
-                                    let is_executable = file_name.ends_with(".exe") || 
-                                                       file_name.ends_with(".bat") || 
-                                                       file_name.ends_with(".cmd") ||
-                                                       file_name.ends_with(".ps1");
-                                    
+                                    let is_executable = file_name.ends_with(".exe")
+                                        || file_name.ends_with(".bat")
+                                        || file_name.ends_with(".cmd")
+                                        || file_name.ends_with(".ps1");
+
                                     if is_executable {
                                         // Remove extension for cleaner completion
-                                        let name_without_ext = if let Some(pos) = file_name.rfind('.') {
-                                            file_name[..pos].to_string()
-                                        } else {
-                                            file_name.clone()
-                                        };
+                                        let name_without_ext =
+                                            if let Some(pos) = file_name.rfind('.') {
+                                                file_name[..pos].to_string()
+                                            } else {
+                                                file_name.clone()
+                                            };
                                         commands.push(name_without_ext);
                                     }
                                 }
@@ -71,12 +110,12 @@ impl Shell {
                     }
                 }
             }
-            
+
             commands
         }
-        
+
         let path_commands = get_path_commands();
-        
+
         // Create command list for completion (built-in + PATH commands)
         let builtin_commands = vec![
             "ls".to_string(),
@@ -109,25 +148,22 @@ impl Shell {
             "theme".to_string(),
             "oh-my-winuxsh".to_string(),
         ];
-        
-        let all_commands: Vec<String> = builtin_commands
-            .into_iter()
-            .chain(path_commands)
-            .collect();
-        
+
+        let all_commands: Vec<String> = builtin_commands.into_iter().chain(path_commands).collect();
+
         // Sort and deduplicate commands
         let mut unique_commands: Vec<_> = all_commands.into_iter().collect();
         unique_commands.sort();
         unique_commands.dedup();
-        
+
         // Create completer with all commands
         let completer = Box::new(DefaultCompleter::new_with_wordlen(unique_commands, 2));
-        
+
         // Create completion menu (exactly like MVP4)
         let completion_menu = Box::new(
             ColumnarMenu::default()
                 .with_name("completion_menu")
-                .with_marker("? ")
+                .with_marker("? "),
         );
 
         // Setup TAB key binding for completion (exactly like MVP4)
@@ -151,7 +187,10 @@ impl Shell {
                 eprintln!(
                     "{} {}",
                     "Warning:".yellow(),
-                    format!("Failed to open history file, using in-memory history: {}", e)
+                    format!(
+                        "Failed to open history file, using in-memory history: {}",
+                        e
+                    )
                 );
                 match FileBackedHistory::new(1000) {
                     Ok(h) => h,
@@ -203,15 +242,23 @@ impl Shell {
                 let winuxcmd_dir = exe_dir.join("winuxcmd");
                 if winuxcmd_dir.exists() {
                     let winuxcmd_path = winuxcmd_dir.to_string_lossy().to_string();
-                    if let Some(path_value) = shell.env_vars.iter()
+                    if let Some(path_value) = shell
+                        .env_vars
+                        .iter()
                         .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
-                        .map(|(_, v)| v.clone()) {
+                        .map(|(_, v)| v.clone())
+                    {
                         // Add winuxcmd to end of PATH to avoid affecting system commands
                         let new_path = format!("{};{}", path_value, winuxcmd_path);
-                        shell.env_vars.insert("PATH".to_string(), ArrayValue::String(new_path.clone()));
+                        shell
+                            .env_vars
+                            .insert("PATH".to_string(), ArrayValue::String(new_path.clone()));
                         std::env::set_var("PATH", &new_path);
                     } else {
-                        shell.env_vars.insert("PATH".to_string(), ArrayValue::String(winuxcmd_path.clone()));
+                        shell.env_vars.insert(
+                            "PATH".to_string(),
+                            ArrayValue::String(winuxcmd_path.clone()),
+                        );
                         std::env::set_var("PATH", &winuxcmd_path);
                     }
                 }
@@ -221,22 +268,34 @@ impl Shell {
         // Load configuration
         if load_config {
             if let Err(e) = shell.load_config() {
-                eprintln!("{} {}", "Warning:".yellow(), format!("Failed to load config: {}", e));
+                eprintln!(
+                    "{} {}",
+                    "Warning:".yellow(),
+                    format!("Failed to load config: {}", e)
+                );
             }
         }
 
         // Initialize plugins
-        use crate::plugin::WelcomePlugin;
         use crate::oh_my_winuxsh::OhMyWinuxsh;
+        use crate::plugin::WelcomePlugin;
 
         // Add welcome plugin
         if let Err(e) = shell.plugins.add_plugin(Box::new(WelcomePlugin)) {
-            eprintln!("{} {}", "Warning:".yellow(), format!("Failed to load welcome plugin: {}", e));
+            eprintln!(
+                "{} {}",
+                "Warning:".yellow(),
+                format!("Failed to load welcome plugin: {}", e)
+            );
         }
 
         // Add oh-my-winuxsh plugin
         if let Err(e) = shell.plugins.add_plugin(Box::new(OhMyWinuxsh)) {
-            eprintln!("{} {}", "Warning:".yellow(), format!("Failed to load oh-my-winuxsh plugin: {}", e));
+            eprintln!(
+                "{} {}",
+                "Warning:".yellow(),
+                format!("Failed to load oh-my-winuxsh plugin: {}", e)
+            );
         }
 
         Ok(shell)
@@ -248,8 +307,16 @@ impl Shell {
 
         // Load shell config
         if let Some(config_path) = ConfigManager::find_config_file() {
-            if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
-                println!("{} {}", "Loading shell config:".cyan(), config_path.display());
+            if config_path
+                .extension()
+                .map(|e| e == "toml")
+                .unwrap_or(false)
+            {
+                println!(
+                    "{} {}",
+                    "Loading shell config:".cyan(),
+                    config_path.display()
+                );
                 let mut config_manager = ConfigManager::new();
                 self.config = config_manager.load_config(&config_path)?;
             } else {
@@ -284,7 +351,8 @@ impl Shell {
 
     /// Get environment variable
     pub fn get_env_var(&self, key: &str, default: &str) -> String {
-        self.env_vars.iter()
+        self.env_vars
+            .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| ArrayValue::String(default.to_string()))
@@ -304,12 +372,15 @@ impl Shell {
             theme.generate_prompt(&username, &hostname, &dir, "$ ")
         } else {
             // Default colored prompt
-            format!("\x1b[1;32m{}@{}\x1b[0m \x1b[1;34m{}\x1b[0m $ ", username, hostname, dir)
+            format!(
+                "\x1b[1;32m{}@{}\x1b[0m \x1b[1;34m{}\x1b[0m $ ",
+                username, hostname, dir
+            )
         };
 
         DefaultPrompt::new(
             DefaultPromptSegment::Basic(prompt_text),
-            DefaultPromptSegment::Empty
+            DefaultPromptSegment::Empty,
         )
     }
 
@@ -328,7 +399,7 @@ impl Shell {
                         chars.next(); // consume '1'
                         if let Some(&'b') = chars.peek() {
                             chars.next(); // consume 'b'
-                            // This is \x1b, add actual ANSI escape
+                                          // This is \x1b, add actual ANSI escape
                             result.push('\x1b');
                         } else {
                             result.push_str("\\x1");
@@ -352,9 +423,8 @@ impl Shell {
 
     /// Save command to history
     pub fn save_history(&mut self, command: &str) -> Result<()> {
-        let clean_command = command.trim_matches(|c: char| {
-            c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace()
-        });
+        let clean_command =
+            command.trim_matches(|c: char| c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace());
 
         if clean_command.is_empty() {
             return Ok(());
@@ -380,16 +450,16 @@ impl Shell {
     pub fn execute_command(&mut self, command: &str) -> Result<()> {
         // Tokenize the command
         let tokens = Tokenizer::tokenize(command)?;
-        
+
         // Parse the tokens into an AST
         let parsed = Parser::parse(&tokens)?;
-        
+
         // Execute the parsed command
         self.execute_parsed(&parsed)?;
-        
+
         Ok(())
     }
-    
+
     /// Execute a parsed command
     pub fn execute_parsed(&mut self, parsed: &ParsedCommand) -> Result<()> {
         match parsed {
@@ -422,7 +492,7 @@ impl Shell {
         }
         Ok(())
     }
-    
+
     /// Execute a single command
     pub fn execute_single_command(&mut self, cmd: &CommandInfo) -> Result<()> {
         // Skip empty commands
@@ -436,17 +506,22 @@ impl Shell {
         // Expand aliases
         let first_arg = &cmd_clone.args[0];
         if let Some(alias_cmd) = self.aliases.get(first_arg) {
-            let alias_parts: Vec<String> = alias_cmd.split_whitespace().map(|s| s.to_string()).collect();
+            let alias_parts: Vec<String> = alias_cmd
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
             if !alias_parts.is_empty() {
                 cmd_clone.args[0] = alias_parts[0].clone();
-                cmd_clone.args.splice(1..1, alias_parts[1..].iter().cloned());
+                cmd_clone
+                    .args
+                    .splice(1..1, alias_parts[1..].iter().cloned());
             }
         }
 
         // Get command name
-        let clean_command = cmd_clone.args[0].trim_matches(|c: char| {
-            c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace()
-        }).to_string();
+        let clean_command = cmd_clone.args[0]
+            .trim_matches(|c: char| c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace())
+            .to_string();
 
         // Expand command substitution in arguments
         let args_with_substitution: Vec<String> = cmd_clone.args[1..]
@@ -456,12 +531,17 @@ impl Shell {
 
         // Expand wildcards in arguments (skip the command name)
         let expanded_args = self.expand_wildcards(&args_with_substitution);
-        
+
         // Combine command name with expanded arguments
         let all_args: Vec<String> = vec![clean_command.clone()]
             .into_iter()
             .chain(expanded_args)
             .collect();
+
+        if self.try_builtin_with_redirection(&clean_command, &all_args, &cmd_clone)? {
+            self.last_exit_code = 0;
+            return Ok(());
+        }
 
         // Now check if it's a built-in command with expanded arguments
         if let Some(result) = self.handle_builtin(&all_args) {
@@ -481,7 +561,8 @@ impl Shell {
         let args: Vec<String> = all_args[1..].to_vec();
 
         // Convert environment variables to the format expected by Executor
-        let env_vars: Vec<(String, ArrayValue)> = self.env_vars
+        let env_vars: Vec<(String, ArrayValue)> = self
+            .env_vars
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -492,7 +573,7 @@ impl Shell {
         // Execute the external command
         let mut cmd_info = cmd_clone;
         cmd_info.args = all_args;
-        
+
         match executor.execute(&clean_command, &args, &cmd_info) {
             Ok(exit_code) => {
                 self.last_exit_code = exit_code;
@@ -508,7 +589,7 @@ impl Shell {
             }
         }
     }
-    
+
     /// Execute a pipeline
     pub fn execute_pipeline(&mut self, cmds: &[CommandInfo]) -> Result<()> {
         // Simplified pipeline execution
@@ -522,7 +603,7 @@ impl Shell {
     /// Expand wildcards in arguments
     pub fn expand_wildcards(&self, args: &[String]) -> Vec<String> {
         let mut expanded = Vec::new();
-        
+
         for arg in args {
             if arg.contains('*') || arg.contains('?') || arg.contains('[') {
                 // Expand wildcard
@@ -543,7 +624,7 @@ impl Shell {
                 expanded.push(arg.clone());
             }
         }
-        
+
         expanded
     }
 
@@ -551,7 +632,7 @@ impl Shell {
     pub fn expand_command_substitution(&mut self, input: &str) -> String {
         let mut result = String::new();
         let mut chars = input.chars().peekable();
-        
+
         while let Some(c) = chars.next() {
             if c == '$' {
                 if let Some(&'(') = chars.peek() {
@@ -559,7 +640,7 @@ impl Shell {
                     chars.next(); // consume '('
                     let mut command = String::new();
                     let mut depth = 1;
-                    
+
                     while let Some(&c) = chars.peek() {
                         chars.next(); // consume char
                         if c == '(' {
@@ -576,7 +657,7 @@ impl Shell {
                             command.push(c);
                         }
                     }
-                    
+
                     // Execute the command and capture output
                     let output = self.execute_and_capture(&command);
                     result.push_str(&output.trim());
@@ -587,26 +668,482 @@ impl Shell {
                 result.push(c);
             }
         }
-        
+
         result
     }
 
     /// Execute command and capture output
     fn execute_and_capture(&mut self, command: &str) -> String {
         use std::process::Command;
-        
+
         match Command::new("cmd").args(["/C", command]).output() {
-            Ok(output) => {
-                String::from_utf8_lossy(&output.stdout).to_string()
-            }
-            Err(_) => String::new()
+            Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+            Err(_) => String::new(),
         }
+    }
+
+    fn try_builtin_with_redirection(
+        &mut self,
+        command: &str,
+        args: &[String],
+        cmd_info: &CommandInfo,
+    ) -> Result<bool> {
+        let has_redirection = cmd_info.stdin_redir.is_some()
+            || cmd_info.stdout_redir.is_some()
+            || cmd_info.stderr_redir.is_some();
+        if !has_redirection {
+            return Ok(false);
+        }
+
+        match command {
+            "echo" => {
+                let mut output = args[1..].join(" ");
+                output.push('\n');
+                self.write_redirection_output(&output, cmd_info)?;
+                Ok(true)
+            }
+            "pwd" => {
+                let output = format!("{}\n", self.current_dir.display());
+                self.write_redirection_output(&output, cmd_info)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn write_redirection_output(&self, output: &str, cmd_info: &CommandInfo) -> Result<()> {
+        if let Some(ref stdout_file) = cmd_info.stdout_redir {
+            use std::io::Write;
+            let mut file = if cmd_info.stdout_append {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(stdout_file)?
+            } else {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(stdout_file)?
+            };
+            file.write_all(output.as_bytes())?;
+            return Ok(());
+        }
+
+        print!("{}", output);
+        Ok(())
+    }
+
+    /// Execute a script file with basic script semantics and positional args.
+    pub fn run_script_file(&mut self, script_path: &Path, script_args: &[String]) -> Result<()> {
+        let script_content = std::fs::read_to_string(script_path)?;
+        let lines: Vec<String> = script_content.lines().map(|s| s.to_string()).collect();
+        let mut state = ScriptState::new(script_args);
+        let _ = self.execute_script_lines(&lines, 0, lines.len(), &mut state)?;
+        Ok(())
+    }
+
+    fn execute_script_lines(
+        &mut self,
+        lines: &[String],
+        start: usize,
+        end: usize,
+        state: &mut ScriptState,
+    ) -> Result<ScriptFlow> {
+        let mut i = start;
+        while i < end {
+            let line = Self::normalize_script_line(&lines[i]);
+            if line.is_empty() || line.starts_with('#') {
+                i += 1;
+                continue;
+            }
+
+            if line == "break" {
+                return Ok(ScriptFlow::Break);
+            }
+            if line == "continue" {
+                return Ok(ScriptFlow::Continue);
+            }
+
+            if line.starts_with("while ") {
+                let (condition, body_start, body_end, next_index) =
+                    self.parse_while_block(lines, i, end)?;
+                loop {
+                    let expanded_condition = self.expand_script_vars(&condition, state);
+                    self.execute_command(&expanded_condition)?;
+                    if self.last_exit_code != 0 {
+                        break;
+                    }
+
+                    match self.execute_script_lines(lines, body_start, body_end, state)? {
+                        ScriptFlow::None => {}
+                        ScriptFlow::Break => break,
+                        ScriptFlow::Continue => continue,
+                    }
+                }
+                i = next_index;
+                continue;
+            }
+
+            if line.starts_with("case ") {
+                i = self.execute_case_block(lines, i, end, state)?;
+                continue;
+            }
+
+            self.execute_script_simple_line(&line, state)?;
+            i += 1;
+        }
+
+        Ok(ScriptFlow::None)
+    }
+
+    fn parse_while_block(
+        &self,
+        lines: &[String],
+        start: usize,
+        end: usize,
+    ) -> Result<(String, usize, usize, usize)> {
+        let header = Self::normalize_script_line(&lines[start]);
+        let mut condition = header.trim_start_matches("while").trim().to_string();
+        let mut body_start = start + 1;
+
+        if condition.ends_with("; do") {
+            condition = condition.trim_end_matches("; do").trim().to_string();
+        } else if condition.ends_with(" do") {
+            condition = condition.trim_end_matches(" do").trim().to_string();
+        } else {
+            let mut cursor = start + 1;
+            while cursor < end {
+                let candidate = Self::normalize_script_line(&lines[cursor]);
+                if candidate.is_empty() || candidate.starts_with('#') {
+                    cursor += 1;
+                    continue;
+                }
+                if candidate == "do" {
+                    body_start = cursor + 1;
+                    break;
+                }
+                return Err(ShellError::InvalidCommand(
+                    "while syntax expects 'do'".to_string(),
+                ));
+            }
+        }
+
+        if condition.ends_with(';') {
+            condition.pop();
+            condition = condition.trim().to_string();
+        }
+        if condition.is_empty() {
+            return Err(ShellError::InvalidCommand(
+                "while condition cannot be empty".to_string(),
+            ));
+        }
+
+        let mut depth = 1usize;
+        let mut cursor = body_start;
+        while cursor < end {
+            let candidate = Self::normalize_script_line(&lines[cursor]);
+            if candidate.starts_with("while ") {
+                depth += 1;
+            } else if candidate == "done" {
+                depth -= 1;
+                if depth == 0 {
+                    let body_end = cursor;
+                    let next_index = cursor + 1;
+                    return Ok((condition, body_start, body_end, next_index));
+                }
+            }
+            cursor += 1;
+        }
+
+        Err(ShellError::InvalidCommand(
+            "while block missing 'done'".to_string(),
+        ))
+    }
+
+    fn execute_case_block(
+        &mut self,
+        lines: &[String],
+        start: usize,
+        end: usize,
+        state: &mut ScriptState,
+    ) -> Result<usize> {
+        let header = Self::normalize_script_line(&lines[start]);
+        if !header.ends_with(" in") {
+            return Err(ShellError::InvalidCommand(
+                "case syntax expects 'case <word> in'".to_string(),
+            ));
+        }
+
+        let word_expr = header
+            .trim_start_matches("case")
+            .trim_end_matches(" in")
+            .trim();
+        let word_expanded = self.expand_script_vars(word_expr, state);
+        let case_word = Self::strip_quotes(word_expanded.trim());
+
+        let mut depth = 1usize;
+        let mut esac_index = None;
+        let mut i = start + 1;
+        while i < end {
+            let line = Self::normalize_script_line(&lines[i]);
+            if line.starts_with("case ") {
+                depth += 1;
+            } else if line == "esac" {
+                depth -= 1;
+                if depth == 0 {
+                    esac_index = Some(i);
+                    break;
+                }
+            }
+            i += 1;
+        }
+
+        let esac = esac_index
+            .ok_or_else(|| ShellError::InvalidCommand("case block missing 'esac'".to_string()))?;
+
+        let mut cursor = start + 1;
+        let mut matched = false;
+        while cursor < esac {
+            let line = Self::normalize_script_line(&lines[cursor]);
+            if line.is_empty() || line.starts_with('#') {
+                cursor += 1;
+                continue;
+            }
+
+            if let Some(close_paren) = line.find(')') {
+                let patterns = line[..close_paren].trim();
+                let remainder = line[close_paren + 1..].trim();
+                let is_match = !matched && self.case_pattern_matches(patterns, &case_word);
+
+                if remainder.ends_with(";;") {
+                    if is_match {
+                        let cmd = remainder.trim_end_matches(";;").trim();
+                        if !cmd.is_empty() {
+                            self.execute_script_simple_line(cmd, state)?;
+                        }
+                        matched = true;
+                    }
+                    cursor += 1;
+                    continue;
+                }
+
+                cursor += 1;
+                while cursor < esac {
+                    let branch_line = Self::normalize_script_line(&lines[cursor]);
+                    if branch_line.ends_with(";;") {
+                        if is_match {
+                            let cmd = branch_line.trim_end_matches(";;").trim();
+                            if !cmd.is_empty() {
+                                self.execute_script_simple_line(cmd, state)?;
+                            }
+                            matched = true;
+                        }
+                        break;
+                    }
+
+                    if is_match {
+                        self.execute_script_simple_line(&branch_line, state)?;
+                    }
+                    cursor += 1;
+                }
+            }
+            cursor += 1;
+        }
+
+        Ok(esac + 1)
+    }
+
+    fn case_pattern_matches(&self, patterns: &str, value: &str) -> bool {
+        for pattern in patterns.split('|') {
+            let pat = Self::strip_quotes(pattern.trim());
+            if pat == "*" {
+                return true;
+            }
+            if pat.contains('*') || pat.contains('?') || pat.contains('[') {
+                if let Ok(glob_pattern) = glob::Pattern::new(&pat) {
+                    if glob_pattern.matches(value) {
+                        return true;
+                    }
+                }
+            } else if pat == value {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn execute_script_simple_line(&mut self, line: &str, state: &mut ScriptState) -> Result<()> {
+        let trimmed = line.trim();
+        if trimmed.starts_with("shift") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            let shift_n = if parts.len() > 1 {
+                parts[1].parse::<usize>().unwrap_or(1)
+            } else {
+                1
+            };
+            state.shift(shift_n);
+            return Ok(());
+        }
+
+        let expanded = self.expand_script_vars(trimmed, state);
+        if expanded.is_empty() {
+            return Ok(());
+        }
+
+        let parts: Vec<&str> = expanded.split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+
+        let mut idx = 0usize;
+        while idx < parts.len() && Self::is_assignment_token(parts[idx]) {
+            if let Some((key, value)) = parts[idx].split_once('=') {
+                state.locals.insert(key.to_string(), value.to_string());
+                self.env_vars
+                    .insert(key.to_string(), ArrayValue::String(value.to_string()));
+                std::env::set_var(key, value);
+            }
+            idx += 1;
+        }
+
+        if idx >= parts.len() {
+            return Ok(());
+        }
+
+        let command = parts[idx..].join(" ");
+        self.execute_command(&command)
+    }
+
+    fn is_assignment_token(token: &str) -> bool {
+        if let Some((key, _)) = token.split_once('=') {
+            if key.is_empty() {
+                return false;
+            }
+            let mut chars = key.chars();
+            if let Some(first) = chars.next() {
+                if !(first.is_ascii_alphabetic() || first == '_') {
+                    return false;
+                }
+            }
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        } else {
+            false
+        }
+    }
+
+    fn expand_script_vars(&self, input: &str, state: &ScriptState) -> String {
+        let mut out = String::new();
+        let mut chars = input.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                out.push(ch);
+                continue;
+            }
+
+            let Some(next) = chars.peek().copied() else {
+                out.push('$');
+                break;
+            };
+
+            match next {
+                '{' => {
+                    chars.next();
+                    let mut name = String::new();
+                    while let Some(c) = chars.peek().copied() {
+                        chars.next();
+                        if c == '}' {
+                            break;
+                        }
+                        name.push(c);
+                    }
+                    out.push_str(&self.resolve_script_var(&name, state));
+                }
+                '#' => {
+                    chars.next();
+                    out.push_str(&state.positional.len().to_string());
+                }
+                '@' | '*' => {
+                    chars.next();
+                    out.push_str(&state.positional.join(" "));
+                }
+                c if c.is_ascii_digit() => {
+                    let mut index = String::new();
+                    while let Some(d) = chars.peek().copied() {
+                        if d.is_ascii_digit() {
+                            chars.next();
+                            index.push(d);
+                        } else {
+                            break;
+                        }
+                    }
+                    let idx = index.parse::<usize>().unwrap_or(0);
+                    if idx > 0 {
+                        if let Some(value) = state.positional(idx - 1) {
+                            out.push_str(value);
+                        }
+                    }
+                }
+                c if c.is_ascii_alphabetic() || c == '_' => {
+                    let mut name = String::new();
+                    while let Some(c2) = chars.peek().copied() {
+                        if c2.is_ascii_alphanumeric() || c2 == '_' {
+                            chars.next();
+                            name.push(c2);
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push_str(&self.resolve_script_var(&name, state));
+                }
+                _ => out.push('$'),
+            }
+        }
+
+        out
+    }
+
+    fn resolve_script_var(&self, name: &str, state: &ScriptState) -> String {
+        if let Some(value) = state.locals.get(name) {
+            return value.clone();
+        }
+
+        if let Some((_, value)) = self
+            .env_vars
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        {
+            if let Some(s) = value.as_string() {
+                return s.to_string();
+            }
+        }
+
+        String::new()
+    }
+
+    fn normalize_script_line(line: &str) -> String {
+        line.trim_matches(|c: char| c == '\u{feff}' || c == '\u{fffe}' || c.is_whitespace())
+            .to_string()
+    }
+
+    fn strip_quotes(s: &str) -> String {
+        if s.len() >= 2 {
+            let bytes = s.as_bytes();
+            if (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'')
+            {
+                return s[1..s.len() - 1].to_string();
+            }
+        }
+        s.to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_shell_creation() {
@@ -627,7 +1164,9 @@ mod tests {
     fn test_and_short_circuit_on_failure() {
         let mut shell = Shell::new(false).unwrap();
         shell.env_vars.remove("SHOULD_NOT_RUN");
-        shell.execute_command("notexistcmd && set SHOULD_NOT_RUN=1").unwrap();
+        shell
+            .execute_command("notexistcmd && set SHOULD_NOT_RUN=1")
+            .unwrap();
         assert!(shell.env_vars.get("SHOULD_NOT_RUN").is_none());
         assert_ne!(shell.last_exit_code, 0);
     }
@@ -636,7 +1175,9 @@ mod tests {
     fn test_or_runs_on_failure() {
         let mut shell = Shell::new(false).unwrap();
         shell.env_vars.remove("SHOULD_RUN");
-        shell.execute_command("notexistcmd || set SHOULD_RUN=1").unwrap();
+        shell
+            .execute_command("notexistcmd || set SHOULD_RUN=1")
+            .unwrap();
         assert_eq!(
             shell.env_vars.get("SHOULD_RUN"),
             Some(&ArrayValue::String("1".to_string()))
@@ -648,8 +1189,71 @@ mod tests {
     fn test_or_short_circuit_on_success() {
         let mut shell = Shell::new(false).unwrap();
         shell.env_vars.remove("SHOULD_NOT_RUN_OR");
-        shell.execute_command("echo hi || set SHOULD_NOT_RUN_OR=1").unwrap();
+        shell
+            .execute_command("echo hi || set SHOULD_NOT_RUN_OR=1")
+            .unwrap();
         assert!(shell.env_vars.get("SHOULD_NOT_RUN_OR").is_none());
         assert_eq!(shell.last_exit_code, 0);
+    }
+
+    #[test]
+    fn test_builtin_echo_redirection() {
+        let mut shell = Shell::new(false).unwrap();
+        let test_dir = std::env::temp_dir().join(format!("winuxsh_redir_{}", std::process::id()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let old_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&test_dir).unwrap();
+        shell.current_dir = test_dir.clone();
+
+        shell.execute_command("echo hello > out.txt").unwrap();
+        let out = fs::read_to_string(test_dir.join("out.txt")).unwrap();
+        assert_eq!(out, "hello\n");
+
+        std::env::set_current_dir(old_dir).unwrap();
+        let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn test_script_control_flow_and_positional_args() {
+        let mut shell = Shell::new(false).unwrap();
+        let test_dir = std::env::temp_dir().join(format!("winuxsh_script_{}", std::process::id()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let old_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&test_dir).unwrap();
+        shell.current_dir = test_dir.clone();
+
+        let script_path = test_dir.join("verify.sh");
+        let script = "\
+#!/bin/bash
+while true; do
+  echo loop
+  break
+done
+RUN_CMD=echo
+case x in
+  x) echo ok ;;
+  *) echo bad ;;
+esac
+echo first=$1
+shift
+echo second=$1
+echo redirected > out.txt
+";
+        fs::write(&script_path, script).unwrap();
+
+        let args = vec!["A".to_string(), "B".to_string()];
+        shell.run_script_file(&script_path, &args).unwrap();
+
+        let out = fs::read_to_string(test_dir.join("out.txt")).unwrap();
+        assert_eq!(out, "redirected\n");
+        assert_eq!(
+            shell.env_vars.get("RUN_CMD"),
+            Some(&ArrayValue::String("echo".to_string()))
+        );
+
+        std::env::set_current_dir(old_dir).unwrap();
+        let _ = fs::remove_dir_all(test_dir);
     }
 }

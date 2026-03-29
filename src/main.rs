@@ -7,26 +7,34 @@
 // - Plugin system support
 // - Modular architecture following Rust best practices
 
+use anyhow::Result;
+use colored::Colorize;
+use reedline::Signal;
 use std::env;
 use std::path::PathBuf;
-use anyhow::Result;
-use reedline::Signal;
-use colored::Colorize;
 
-mod error;
 mod array;
-mod plugin;
-mod job;
-mod config;
-mod shell;
 mod builtins;
-mod tokenizer;
-mod parser;
+mod config;
+mod error;
 mod executor;
-mod theme;
+mod job;
 mod oh_my_winuxsh;
+mod parser;
+mod plugin;
+mod shell;
+mod theme;
+mod tokenizer;
 
 use shell::Shell;
+
+fn print_usage() {
+    println!("WinSH usage:");
+    println!("  winuxsh -c \"command\"");
+    println!("  winuxsh script.sh [args...]");
+    println!("  winuxsh --help | -h");
+    println!("  winuxsh --version");
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -48,32 +56,37 @@ fn run() -> Result<()> {
             "-c" => {
                 if args.len() > 2 {
                     let mut shell = Shell::new(true)?;
-                    shell.save_history(&args[2])?;
+                    if let Err(e) = shell.save_history(&args[2]) {
+                        eprintln!(
+                            "{} {}",
+                            "Warning:".yellow(),
+                            format!("Failed to save history: {}", e)
+                        );
+                    }
                     shell.execute_command(&args[2])?;
                 } else {
                     eprintln!("{} {}", "Error:".red(), "-c requires an argument");
                     std::process::exit(1);
                 }
             }
+            "--help" | "-h" => {
+                print_usage();
+            }
             "--version" => {
-                println!("{}", "WinSH MVP6 - Array Support and Internationalization version 0.6.0".green());
+                println!(
+                    "{}",
+                    "WinSH MVP6 - Array Support and Internationalization version 0.6.0".green()
+                );
             }
             _ => {
                 // Check if it's a script file
                 let script_path = PathBuf::from(&args[1]);
                 if script_path.exists() {
                     let mut shell = Shell::new(true)?;
-                    let script_content = std::fs::read_to_string(&script_path)?;
-                    for line in script_content.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        shell.execute_command(line)?;
-                    }
+                    shell.run_script_file(&script_path, &args[2..])?;
                 } else {
                     eprintln!("{} {}", "Unknown argument:".red(), args[1]);
-                    eprintln!("Usage: winsh [-c command] [script.sh]");
+                    print_usage();
                     std::process::exit(1);
                 }
             }
@@ -90,7 +103,10 @@ fn run() -> Result<()> {
 // Add this to shell module temporarily
 impl Shell {
     pub fn run_repl(&mut self) -> Result<()> {
-        println!("{}", "WinSH MVP6 - Array Support and Internationalization".green());
+        println!(
+            "{}",
+            "WinSH MVP6 - Array Support and Internationalization".green()
+        );
         println!("Type 'help' for available commands");
         println!();
 
@@ -105,7 +121,11 @@ impl Shell {
                     }
 
                     if let Err(e) = self.save_history(line) {
-                        eprintln!("{} {}", "Warning:".yellow(), format!("Failed to save history: {}", e));
+                        eprintln!(
+                            "{} {}",
+                            "Warning:".yellow(),
+                            format!("Failed to save history: {}", e)
+                        );
                     }
 
                     // Execute command
