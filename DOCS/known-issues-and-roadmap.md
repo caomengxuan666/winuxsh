@@ -9,91 +9,6 @@ This document tracks current issues, bugs, and future improvements for WinSH (Wi
 
 ---
 
-## 🔴 Critical Issues
-
-### 1. Broken Pipeline Functionality
-
-**Severity**: Critical  
-**Status**: Open  
-**Priority**: P0
-
-**Description**:
-Pipeline operations do not work correctly. When piping output from one command to another, the entire output is displayed instead of being filtered/processed.
-
-**Examples**:
-```bash
-# Expected: Display first 3 lines
-# Actual: Displays entire file
-cat file.txt | head -n 3
-
-# Expected: Count lines
-# Actual: Displays all output then counts
-dir | wc -l
-```
-
-**Current Workaround**:
-Using temporary files for pipe buffering in `src/shell.rs`:
-```rust
-let temp_pipe_file = format!("winuxsh_pipe_{}.tmp", std::process::id());
-```
-
-**Root Cause**:
-- Windows process creation and pipe handling differs from Unix
-- Current implementation does not properly connect stdin/stdout between processes
-- May need to use Windows anonymous pipes or named pipes
-
-**Proposed Solution**:
-1. Implement proper Windows anonymous pipes using `CreatePipe`
-2. Connect child process stdin/stdout to pipe handles
-3. Handle pipe buffering and synchronization correctly
-4. Test with various pipe combinations
-
-**Affected Files**:
-- `src/executor.rs` - External command execution
-- `src/shell.rs` - Pipeline orchestration
-
----
-
-### 2. Broken Output Redirection
-
-**Severity**: Critical  
-**Status**: Open  
-**Priority**: P0
-
-**Description**:
-Output redirection operators (`>`, `>>`) do not work correctly. Output is displayed in terminal instead of being written to file.
-
-**Examples**:
-```bash
-# Expected: Write "test" to file.txt (no terminal output)
-# Actual: Displays "test" in terminal, file not created/updated
-echo "test" > file.txt
-
-# Expected: Append to file
-# Actual: Displays in terminal
-echo "more" >> file.txt
-```
-
-**Current Behavior**:
-Redirection directives are parsed but not properly applied during command execution.
-
-**Root Cause**:
-- Stdio redirection not properly configured for child processes
-- File handles not correctly passed to subprocess
-- May be related to pipeline issues (both involve stdio manipulation)
-
-**Proposed Solution**:
-1. Ensure stdout/stderr handles are properly configured before spawning processes
-2. Use `Stdio::from()` for file-based redirection
-3. Test all redirection types: `>`, `>>`, `2>`, `<`
-
-**Affected Files**:
-- `src/executor.rs` - Stdio configuration
-- `src/tokenizer.rs` - Redirection parsing
-- `src/shell.rs` - Redirection application
-
----
-
 ## 🟡 Medium Priority Issues
 
 ### 3. Command Compatibility Issues
@@ -243,7 +158,51 @@ warning: winuxsh@0.6.0: winuxcmd.dll not found at utils/winuxcmd/winuxcmd.dll fo
 
 ## ✅ Recently Resolved Issues
 
-### 7. Ctrl+C Killing Entire Shell - FIXED ✓
+### 7. Broken Pipeline Functionality - FIXED ✓
+
+**Severity**: Critical (Previously)  
+**Status**: Resolved  
+**Resolution Date**: 2026-04-01
+
+**Description**:
+Pipeline operations did not work correctly. When piping output from one command to another, the entire output was displayed instead of being filtered/processed.
+
+**Examples**:
+```bash
+# Expected: Display first 3 lines
+# Actual (before fix): Displays entire file
+# Actual (after fix): Correctly displays first 3 lines
+cat file.txt | head -n 3
+```
+
+**Solution Implemented**:
+- Replaced temporary file workaround with proper Windows anonymous pipes
+- Use `Stdio::piped()` for connecting child process stdin/stdout
+- Properly connect command outputs to next command's input
+
+**Commit**: `bfadc5c`
+
+---
+
+### 8. Broken Output Redirection - FIXED ✓
+
+**Severity**: Critical (Previously)  
+**Status**: Resolved  
+**Resolution Date**: 2026-04-01
+
+**Description**:
+Output redirection operators (`>`, `>>`) did not work correctly. Output was displayed in terminal instead of being written to file.
+
+**Solution Implemented**:
+- Implemented stdout/stderr redirection in WinuxCmd DLL execution
+- Support both write (`>`) and append (`>>`) modes
+- Handle stdin redirection by falling back to external execution
+
+**Commit**: `bfadc5c`
+
+---
+
+### 9. Ctrl+C Killing Entire Shell - FIXED ✓
 
 **Severity**: Critical (Previously)  
 **Status**: Resolved  
@@ -405,10 +364,10 @@ Implemented intelligent command routing with significant performance improvement
 
 | Category | Count | Priority |
 |----------|-------|----------|
-| Critical | 2 | P0 |
+| Critical | 0 | P0 |
 | Medium | 2 | P1 |
 | Low | 2 | P2 |
-| Resolved | 3 | N/A |
+| Resolved | 5 | N/A |
 | Future | 11 | Various |
 
 ---
