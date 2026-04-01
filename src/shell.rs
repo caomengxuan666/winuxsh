@@ -227,7 +227,7 @@ impl Shell {
             .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
             .with_edit_mode(edit_mode)
             .with_history(Box::new(history))
-            .with_quick_completions(true)
+            .with_quick_completions(false)
             .with_partial_completions(true);
 
         // Load command classification and create router
