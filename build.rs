@@ -8,10 +8,11 @@ fn main() {
     #[cfg(debug_assertions)]
     {
         // Check for development mode warnings
-        let dll_path = std::path::Path::new("utils/winuxcmd/winuxcmd.dll");
+        // Note: DLL name changed from winuxcmd.dll to winuxcore.dll
+        let dll_path = std::path::Path::new("utils/winuxcmd/winuxcore.dll");
         if !dll_path.exists() {
             println!(
-                "cargo:warning=winuxcmd.dll not found at {} for development",
+                "cargo:warning=winuxcore.dll not found at {} for development",
                 dll_path.display()
             );
         }
