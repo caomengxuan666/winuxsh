@@ -18,6 +18,7 @@ env_logger = "0.11"
 nu-ansi-term = "0.50"
 glob = "0.3"
 libloading = "0.8"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3.0"

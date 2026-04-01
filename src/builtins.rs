@@ -491,7 +491,7 @@ impl Shell {
             return;
         }
 
-        if !WinuxCmdFFI::is_available() {
+        if !WinuxCmdFFI::is_initialized() {
             eprintln!(
                 "{} {}",
                 "FFI not available:".yellow(),
@@ -518,10 +518,12 @@ impl Shell {
         match WinuxCmdFFI::execute(&command, &args_slice) {
             Ok(response) => {
                 if !response.stdout.is_empty() {
-                    print!("{}", response.stdout);
+                    let stdout_str = String::from_utf8_lossy(&response.stdout);
+                    print!("{}", stdout_str);
                 }
                 if !response.stderr.is_empty() {
-                    eprint!("{} {}", "Error:".red(), response.stderr);
+                    let stderr_str = String::from_utf8_lossy(&response.stderr);
+                    eprint!("{} {}", "Error:".red(), stderr_str);
                 }
                 println!("Exit code: {}", response.exit_code);
             }
@@ -536,9 +538,11 @@ impl Shell {
         use crate::winuxcmd_ffi::WinuxCmdFFI;
 
         let _ = WinuxCmdFFI::init();
-        if WinuxCmdFFI::is_available() {
-            let version = WinuxCmdFFI::get_version();
-            println!("{} {}", "WinuxCmd version:".green(), version);
+        if WinuxCmdFFI::is_initialized() {
+            match WinuxCmdFFI::get_version() {
+                Ok(version) => println!("{} {}", "WinuxCmd version:".green(), version),
+                Err(e) => eprintln!("{} {}", "Failed to get version:".yellow(), e),
+            }
         } else {
             eprintln!(
                 "{} {}",
@@ -553,7 +557,7 @@ impl Shell {
         use crate::winuxcmd_ffi::WinuxCmdFFI;
 
         let _ = WinuxCmdFFI::init();
-        if WinuxCmdFFI::is_available() {
+        if WinuxCmdFFI::is_initialized() {
             match WinuxCmdFFI::get_all_commands() {
                 Ok(commands) => {
                     println!(

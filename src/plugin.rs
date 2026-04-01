@@ -29,7 +29,6 @@ impl Plugin for WelcomePlugin {
     }
 
     fn init(&mut self) -> Result<()> {
-        println!("Welcome plugin initialized!");
         Ok(())
     }
 

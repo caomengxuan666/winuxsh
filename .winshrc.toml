@@ -1,12 +1,14 @@
 # WinSH Configuration File
 
-# Simple color configuration using ANSI escape sequences
-prompt_user_color = \x1b[1;32m
-prompt_host_color = \x1b[1;36m
-prompt_dir_color = \x1b[1;34m
-prompt_symbol = \x1b[0m
+# WinuxCmd Configuration
+[winuxcmd]
+# Enable WinuxCmd DLL for Unix commands (default: true)
+# Set to false to force all commands to use PATH execution
+# Note: When enabled, some commands (grep, sed, etc.) are forced to use PATH for better Ctrl+C handling
+enable_ipc = true
 
 # Aliases
+[aliases]
 ll = "ls -la"
 la = "ls -a"
 l = "ls -CF"

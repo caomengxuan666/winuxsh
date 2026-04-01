@@ -1,21 +1,19 @@
 // Build script for WinSH
-// Handles DLL path configuration for WinuxCmd FFI
+// Handles build configuration
 
 fn main() {
-    // Output the path to winuxcmd.dll for runtime linking
-    println!("cargo:rustc-link-search=native=utils/winuxcmd");
-    println!("cargo:rustc-link-lib=dylib=winuxcmd");
+    // Note: WinuxCmd FFI now uses dynamic loading via libloading
+    // No static linking configuration needed
 
-    // For development, also check if DLL exists
     #[cfg(debug_assertions)]
     {
+        // Check for development mode warnings
         let dll_path = std::path::Path::new("utils/winuxcmd/winuxcmd.dll");
         if !dll_path.exists() {
             println!(
-                "cargo:warning=winuxcmd.dll not found at {}",
+                "cargo:warning=winuxcmd.dll not found at {} for development",
                 dll_path.display()
             );
-            println!("cargo:warning=FFI functionality will not be available");
         }
     }
 }

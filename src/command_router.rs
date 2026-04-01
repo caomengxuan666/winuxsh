@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::path::PathBuf;
+use log::debug;
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub enum CommandCategory {
@@ -95,14 +97,36 @@ impl CommandClassification {
 }
 
 pub fn load_classification() -> Result<CommandClassification> {
-    let config_path = "commands_classification.toml";
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| anyhow!("Failed to read classification file: {}", e))?;
-    
-    let classification: CommandClassification = toml::from_str(&content)
-        .map_err(|e| anyhow!("Failed to parse classification file: {}", e))?;
-    
-    Ok(classification)
+    // Get executable path and build config search paths relative to it
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow!("Failed to get executable path: {}", e))?;
+
+    let exe_dir = exe_path.parent()
+        .ok_or_else(|| anyhow!("Failed to get executable directory"))?;
+
+    // Try multiple possible locations for the classification file
+    let possible_paths = vec![
+        PathBuf::from("commands_classification.toml"),  // Current directory
+        exe_dir.join("commands_classification.toml"),  // Same directory as executable
+        exe_dir.join("../../commands_classification.toml"),  // Development: from target/release back to project root
+        exe_dir.join("../../../commands_classification.toml"),  // Development: deeper nesting
+    ];
+
+    for config_path in &possible_paths {
+        if let Ok(content) = std::fs::read_to_string(config_path) {
+            let classification: CommandClassification = toml::from_str(&content)
+                .map_err(|e| anyhow!("Failed to parse classification file {}: {}", config_path.display(), e))?;
+            return Ok(classification);
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to read classification file from any location. Searched: {}",
+        possible_paths.iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 #[cfg(test)]
@@ -178,7 +202,7 @@ mod tests {
 pub enum RouteDecision {
     /// Native WinSH builtin command (highest priority)
     Builtin,
-    /// Execute via WinuxCmd daemon IPC
+    /// Execute via WinuxCmd DLL
     WinuxCmdIPC(CommandCategory),
     /// Execute via PATH as external command
     ExternalCommand,
@@ -189,16 +213,22 @@ pub enum RouteDecision {
 /// Command router for determining how to execute commands
 pub struct CommandRouter {
     classification: CommandClassification,
-    daemon_available: bool,
+    ffi_available: bool,
+    enable_ipc: bool,
 }
 
 impl CommandRouter {
     /// Create a new command router
-    pub fn new(classification: CommandClassification) -> Self {
-        let daemon_available = crate::winuxcmd_ffi::WinuxCmdFFI::is_available();
+    pub fn new(classification: CommandClassification, enable_ipc: bool) -> Self {
+        let ffi_available = if enable_ipc {
+            crate::winuxcmd_ffi::WinuxCmdFFI::is_initialized()
+        } else {
+            false
+        };
         Self {
             classification,
-            daemon_available,
+            ffi_available,
+            enable_ipc,
         }
     }
 
@@ -206,7 +236,7 @@ impl CommandRouter {
     ///
     /// Routing priority:
     /// 1. Builtin commands (highest)
-    /// 2. WinuxCmd IPC commands (if daemon available)
+    /// 2. WinuxCmd DLL commands (if FFI available AND enabled)
     /// 3. External commands from PATH (lowest)
     pub fn route_command(&self, command: &str) -> RouteDecision {
         // Check if command contains path separator - use external execution
@@ -219,9 +249,28 @@ impl CommandRouter {
             return RouteDecision::Builtin;
         }
 
-        // 2. Check WinuxCmd IPC (if daemon available)
-        if self.daemon_available {
+        // 2. Check WinuxCmd DLL (if FFI available AND enabled)
+        // But force certain commands to use PATH for better signal handling
+        if self.enable_ipc && self.ffi_available {
             if let Some(category) = self.classification.classify(command) {
+                // Interactive commands need TTY support, use PATH execution
+                if category == CommandCategory::Interactive {
+                    debug!("Force PATH execution for interactive command: {}", command);
+                    return RouteDecision::ExternalCommand;
+                }
+                
+                // Text processing commands that might wait for input
+                // Force them to use PATH for proper Ctrl+C handling
+                let input_waiting_commands = vec![
+                    "grep", "sed", "awk", "perl", "python", "ruby", "less", "more", "vi", "vim", "nano", "ed", "emacs",
+                    "ssh", "telnet", "ftp", "sftp", "nc", "netcat"
+                ];
+                if input_waiting_commands.iter().any(|&cmd| cmd == command) {
+                    debug!("Force PATH execution for input-waiting command: {}", command);
+                    return RouteDecision::ExternalCommand;
+                }
+                
+                debug!("Route to WinuxCmd DLL: {}", command);
                 return RouteDecision::WinuxCmdIPC(category);
             }
         }
@@ -231,19 +280,34 @@ impl CommandRouter {
         RouteDecision::ExternalCommand
     }
 
-    /// Update daemon availability status
+    /// Update FFI availability status
     pub fn update_daemon_status(&mut self) {
-        self.daemon_available = crate::winuxcmd_ffi::WinuxCmdFFI::is_available();
+        self.ffi_available = crate::winuxcmd_ffi::WinuxCmdFFI::is_initialized();
     }
 
-    /// Check if daemon is available
-    pub fn is_daemon_available(&self) -> bool {
-        self.daemon_available
+    /// Check if FFI is available
+    pub fn is_ffi_available(&self) -> bool {
+        self.ffi_available
     }
 
     /// Get reference to command classification
     pub fn classification(&self) -> &CommandClassification {
         &self.classification
+    }
+
+    /// Set IPC enable/disable status
+    pub fn set_enable_ipc(&mut self, enable: bool) {
+        self.enable_ipc = enable;
+        if enable {
+            self.ffi_available = crate::winuxcmd_ffi::WinuxCmdFFI::is_initialized();
+        } else {
+            self.ffi_available = false;
+        }
+    }
+
+    /// Check if IPC is enabled
+    pub fn is_ipc_enabled(&self) -> bool {
+        self.enable_ipc
     }
 }
 
@@ -283,7 +347,7 @@ mod router_tests {
         let classification = load_classification().unwrap();
         let router = CommandRouter::new(classification);
         
-        if router.is_daemon_available() {
+        if router.is_ffi_available() {
             assert_eq!(
                 router.route_command("ls"),
                 RouteDecision::WinuxCmdIPC(CommandCategory::Simple)
@@ -306,7 +370,7 @@ mod router_tests {
         let classification = load_classification().unwrap();
         let router = CommandRouter::new(classification);
         
-        if router.is_daemon_available() {
+        if router.is_ffi_available() {
             assert_eq!(
                 router.route_command("less"),
                 RouteDecision::WinuxCmdIPC(CommandCategory::Interactive)
@@ -323,7 +387,7 @@ mod router_tests {
         let classification = load_classification().unwrap();
         let router = CommandRouter::new(classification);
         
-        if router.is_daemon_available() {
+        if router.is_ffi_available() {
             assert_eq!(
                 router.route_command("sed"),
                 RouteDecision::WinuxCmdIPC(CommandCategory::Complex)

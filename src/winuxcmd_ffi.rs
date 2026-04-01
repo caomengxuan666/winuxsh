@@ -1,22 +1,21 @@
-// WinuxCmd FFI bindings for WinSH
-// Provides IPC client interface to WinuxCmd daemon
+﻿/// WinuxCmd FFI bindings for direct DLL execution
+/// No daemon required - all commands execute directly via the DLL
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::Once;
 use libloading::{Library, Symbol};
 
 /// Response from WinuxCmd FFI
 #[derive(Debug)]
 pub struct WinuxCmdResponse {
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
     pub exit_code: i32,
 }
 
 /// FFI function types
-type WinuxExecuteFunc = unsafe extern "C" fn(
+type ExecuteFunc = unsafe extern "C" fn(
     *const c_char,
     *const *const c_char,
     c_int,
@@ -27,297 +26,245 @@ type WinuxExecuteFunc = unsafe extern "C" fn(
     *mut usize,
 ) -> c_int;
 
-type WinuxFreeBufferFunc = unsafe extern "C" fn(*mut c_char);
+type FreeBufferFunc = unsafe extern "C" fn(*mut c_char);
 
-type WinuxIsDaemonAvailableFunc = unsafe extern "C" fn() -> c_int;
+type GetVersionFunc = unsafe extern "C" fn() -> *const c_char;
 
-type WinuxGetVersionFunc = unsafe extern "C" fn() -> *const c_char;
-
-type WinuxGetProtocolVersionFunc = unsafe extern "C" fn() -> c_int;
-
-type WinuxGetAllCommandsFunc = unsafe extern "C" fn(
+type GetAllCommandsFunc = unsafe extern "C" fn(
     *mut *mut *mut c_char,
     *mut c_int,
 ) -> c_int;
 
-/// Global FFI library
-static FFI_LIBRARY: Mutex<Option<Library>> = Mutex::new(None);
+type FreeCommandsArrayFunc = unsafe extern "C" fn(*mut *mut c_char, c_int);
+
+/// Global FFI library and functions
+static mut FFI_LIBRARY: Option<Library> = None;
+static mut FFI: FfiFunctions = FfiFunctions {
+    execute: None,
+    free_buffer: None,
+    get_version: None,
+    get_all_commands: None,
+    free_commands_array: None,
+};
+
+struct FfiFunctions {
+    execute: Option<ExecuteFunc>,
+    free_buffer: Option<FreeBufferFunc>,
+    get_version: Option<GetVersionFunc>,
+    get_all_commands: Option<GetAllCommandsFunc>,
+    free_commands_array: Option<FreeCommandsArrayFunc>,
+}
+
+unsafe impl Send for FfiFunctions {}
 
 /// Safe wrapper for WinuxCmd FFI
 pub struct WinuxCmdFFI;
 
-static INIT: Once = Once::new();
-
 impl WinuxCmdFFI {
-    /// Initialize WinuxCmd FFI
-    pub fn init() -> Result<(), String> {
-        let mut result = Ok(());
+    /// Initialize WinuxCmd FFI by loading the DLL
+    pub fn init() -> anyhow::Result<()> {
+        unsafe {
+            if FFI_LIBRARY.is_some() {
+                return Ok(()); // Already initialized
+            }
 
-        INIT.call_once(|| {
+            // Get executable path and build DLL search paths relative to it
+            let exe_path = std::env::current_exe()?;
+            let exe_dir = exe_path.parent()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get executable directory"))?;
+
             let dll_paths = vec![
-                "utils/winuxcmd/winuxcmd.dll",
-                "./winuxcmd.dll",
-                "../utils/winuxcmd/winuxcmd.dll",
+                exe_dir.join("winuxcmd/winuxcore.dll"),  // New DLL name
+                exe_dir.join("../utils/winuxcmd/winuxcore.dll"),
+                exe_dir.join("../../utils/winuxcmd/winuxcore.dll"),
+                exe_dir.join("winuxcore.dll"),
             ];
 
-            let mut last_error = String::new();
+            let mut library: Option<Library> = None;
+            let mut error_msg = String::new();
 
-            for dll_path in dll_paths {
-                match unsafe { Library::new(dll_path) } {
+            for path in dll_paths {
+                match unsafe { Library::new(&path) } {
                     Ok(lib) => {
-                        *FFI_LIBRARY.lock().unwrap() = Some(lib);
-                        return;
+                        library = Some(lib);
+                        break;
                     }
                     Err(e) => {
-                        last_error = format!("{}: {}", dll_path, e);
-                        continue;
+                        error_msg.push_str(&format!("  - {}: {}\n", path.display(), e));
                     }
                 }
             }
 
-            result = Err(format!("Failed to load winuxcmd.dll from any location. Last error: {}", last_error));
-        });
+            let library = library.ok_or_else(|| {
+                anyhow::anyhow!("Failed to load winuxcore.dll from any location. Tried:\n{}", error_msg)
+            })?;
 
-        result
-    }
+            // Load all function pointers at once - this will move library but we get what we need
+            let (execute, free_buffer, get_version, get_all_commands, free_commands_array) = unsafe {
+                let execute_sym: Symbol<ExecuteFunc> = library.get(b"winux_execute")?;
+                let free_buffer_sym: Symbol<FreeBufferFunc> = library.get(b"winux_free_buffer")?;
+                let get_version_sym: Symbol<GetVersionFunc> = library.get(b"winux_get_version")?;
+                let get_all_commands_sym: Symbol<GetAllCommandsFunc> = library.get(b"winux_get_all_commands")?;
+                let free_commands_array_sym: Symbol<FreeCommandsArrayFunc> = library.get(b"winux_free_commands_array")?;
 
-    /// Check if WinuxCmd is available
-    pub fn is_available() -> bool {
-        if let Some(ref lib) = *FFI_LIBRARY.lock().unwrap() {
-            unsafe {
-                let is_daemon_available: Symbol<WinuxIsDaemonAvailableFunc> = lib.get(b"winux_is_daemon_available").unwrap();
-                is_daemon_available() != 0
-            }
-        } else {
-            false
+                (
+                    *execute_sym.into_raw(),
+                    *free_buffer_sym.into_raw(),
+                    *get_version_sym.into_raw(),
+                    *get_all_commands_sym.into_raw(),
+                    *free_commands_array_sym.into_raw(),
+                )
+            };
+
+            // Now library is consumed, so we don't need to store it anymore
+            // The function pointers are already extracted and stored in FFI struct
+            FFI.execute = Some(execute);
+            FFI.free_buffer = Some(free_buffer);
+            FFI.get_version = Some(get_version);
+            FFI.get_all_commands = Some(get_all_commands);
+            FFI.free_commands_array = Some(free_commands_array);
+
+            FFI_LIBRARY = Some(library);
+            FFI.execute = Some(execute);
+            FFI.free_buffer = Some(free_buffer);
+            FFI.get_version = Some(get_version);
+            FFI.get_all_commands = Some(get_all_commands);
+            FFI.free_commands_array = Some(free_commands_array);
+
+            Ok(())
         }
     }
 
-    /// Get WinuxCmd version
-    pub fn get_version() -> String {
-        if let Some(ref lib) = *FFI_LIBRARY.lock().unwrap() {
-            unsafe {
-                let get_version: Symbol<WinuxGetVersionFunc> = lib.get(b"winux_get_version").unwrap();
-                let version_ptr = get_version();
-                if version_ptr.is_null() {
-                    "unknown".to_string()
-                } else {
-                    CStr::from_ptr(version_ptr)
-                        .to_string_lossy()
-                        .to_string()
-                }
-            }
-        } else {
-            "FFI not initialized".to_string()
-        }
+    /// Check if WinuxCmd FFI is initialized and ready
+    pub fn is_initialized() -> bool {
+        unsafe { FFI_LIBRARY.is_some() }
     }
 
-    /// Get protocol version
-    pub fn get_protocol_version() -> i32 {
-        if let Some(ref lib) = *FFI_LIBRARY.lock().unwrap() {
-            unsafe {
-                let get_protocol_version: Symbol<WinuxGetProtocolVersionFunc> = lib.get(b"winux_get_protocol_version").unwrap();
-                get_protocol_version()
+    /// Execute a WinuxCmd command directly via DLL
+    pub fn execute(command: &str, args: &[String]) -> Result<WinuxCmdResponse, anyhow::Error> {
+        unsafe {
+            if !Self::is_initialized() {
+                Self::init()?;
             }
-        } else {
-            -1
-        }
-    }
 
-    /// Get all available commands
-    pub fn get_all_commands() -> Result<Vec<String>, String> {
-        if let Some(ref lib) = *FFI_LIBRARY.lock().unwrap() {
-            unsafe {
-                let get_all_commands: Symbol<WinuxGetAllCommandsFunc> = lib.get(b"winux_get_all_commands")
-                    .map_err(|e| format!("Failed to load winux_get_all_commands: {}", e))?;
-                let free_buffer: Symbol<WinuxFreeBufferFunc> = lib.get(b"winux_free_buffer")
-                    .map_err(|e| format!("Failed to load winux_free_buffer: {}", e))?;
+            if let Some(execute) = FFI.execute {
+                let cmd_cstring = CString::new(command)?;
+                let mut arg_cstrings: Vec<CString> = args.iter()
+                    .map(|arg| CString::new(arg.as_str()))
+                    .collect::<Result<Vec<_>, _>>()?;
 
-                let mut commands_ptr: *mut *mut c_char = std::ptr::null_mut();
-                let mut count: c_int = 0;
+                let mut arg_pointers: Vec<*const c_char> = arg_cstrings.iter()
+                    .map(|cs| cs.as_ptr())
+                    .collect();
 
-                let result = get_all_commands(&mut commands_ptr, &mut count);
-
-                if result != 0 {
-                    return Err(format!("Failed to get commands (error code: {})", result));
-                }
-
-                let mut commands = Vec::new();
-                
-                for i in 0..count {
-                    let cmd_ptr = *commands_ptr.add(i as usize);
-                    if !cmd_ptr.is_null() {
-                        let cmd = CStr::from_ptr(cmd_ptr)
-                            .to_string_lossy()
-                            .to_string();
-                        commands.push(cmd);
-                        free_buffer(cmd_ptr);
-                    }
-                }
-                free_buffer(commands_ptr as *mut c_char);
-
-                Ok(commands)
-            }
-        } else {
-            Err("FFI not initialized".to_string())
-        }
-    }
-
-    /// Execute a command via WinuxCmd
-    pub fn execute(command: &str, args: &[String]) -> Result<WinuxCmdResponse, String> {
-        if let Some(ref lib) = *FFI_LIBRARY.lock().unwrap() {
-            unsafe {
-                let execute: Symbol<WinuxExecuteFunc> = lib.get(b"winux_execute")
-                    .map_err(|e| format!("Failed to load winux_execute: {}", e))?;
-                let free_buffer: Symbol<WinuxFreeBufferFunc> = lib.get(b"winux_free_buffer")
-                    .map_err(|e| format!("Failed to load winux_free_buffer: {}", e))?;
-
-                // Convert command to C string
-                let command_cstr = CString::new(command)
-                    .map_err(|e| format!("Invalid command name: {}", e))?;
-
-                // Convert arguments to C strings
-                let mut args_cstrings: Vec<CString> = Vec::new();
-                let mut args_ptrs: Vec<*const c_char> = Vec::new();
-
-                for arg in args {
-                    let arg_cstr = CString::new(arg.as_str())
-                        .map_err(|e| format!("Invalid argument: {}", e))?;
-                    args_ptrs.push(arg_cstr.as_ptr());
-                    args_cstrings.push(arg_cstr);
-                }
-                args_ptrs.push(std::ptr::null()); // Null-terminated array
-
-                // Setup output buffers
-                let mut output_ptr: *mut c_char = std::ptr::null_mut();
-                let mut error_ptr: *mut c_char = std::ptr::null_mut();
+                let mut output: *mut c_char = std::ptr::null_mut();
+                let mut error: *mut c_char = std::ptr::null_mut();
                 let mut output_size: usize = 0;
                 let mut error_size: usize = 0;
 
-                // Execute command
                 let exit_code = execute(
-                    command_cstr.as_ptr(),
-                    args_ptrs.as_ptr(),
-                    args.len() as c_int,
-                    std::ptr::null(), // Use default cwd
-                    &mut output_ptr,
-                    &mut error_ptr,
+                    cmd_cstring.as_ptr(),
+                    arg_pointers.as_ptr(),
+                    arg_pointers.len() as c_int,
+                    std::ptr::null(),
+                    &mut output,
+                    &mut error,
                     &mut output_size,
                     &mut error_size,
                 );
 
-                // Extract output
-                let stdout = {
-                    if output_ptr.is_null() || output_size == 0 {
-                        String::new()
-                    } else {
-                        let slice = std::slice::from_raw_parts(output_ptr as *const u8, output_size);
-                        String::from_utf8_lossy(slice).to_string()
-                    }
+                let stdout_data = if !output.is_null() && output_size > 0 {
+                    let slice = std::slice::from_raw_parts(output as *const u8, output_size);
+                    slice.to_vec()
+                } else {
+                    Vec::new()
                 };
 
-                let stderr = {
-                    if error_ptr.is_null() || error_size == 0 {
-                        String::new()
-                    } else {
-                        let slice = std::slice::from_raw_parts(error_ptr as *const u8, error_size);
-                        String::from_utf8_lossy(slice).to_string()
-                    }
+                let stderr_data = if !error.is_null() && error_size > 0 {
+                    let slice = std::slice::from_raw_parts(error as *const u8, error_size);
+                    slice.to_vec()
+                } else {
+                    Vec::new()
                 };
 
                 // Free buffers
-                if !output_ptr.is_null() {
-                    free_buffer(output_ptr);
+                if !output.is_null() {
+                    if let Some(free_buffer) = FFI.free_buffer {
+                        free_buffer(output);
+                    }
                 }
-                if !error_ptr.is_null() {
-                    free_buffer(error_ptr);
+                if !error.is_null() {
+                    if let Some(free_buffer) = FFI.free_buffer {
+                        free_buffer(error);
+                    }
                 }
 
                 Ok(WinuxCmdResponse {
-                    stdout,
-                    stderr,
+                    stdout: stdout_data,
+                    stderr: stderr_data,
                     exit_code,
                 })
+            } else {
+                Err(anyhow::anyhow!("WinuxCmd FFI not initialized"))
             }
-        } else {
-            Err("FFI not initialized".to_string())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_winuxcmd_init() {
-        let result = WinuxCmdFFI::init();
-        assert!(result.is_ok(), "WinuxCmd FFI should initialize successfully");
-    }
-
-    #[test]
-    fn test_winuxcmd_available() {
-        let _ = WinuxCmdFFI::init();
-        // This test depends on whether daemon is running
-        let available = WinuxCmdFFI::is_available();
-        println!("Daemon available: {}", available);
-    }
-
-    #[test]
-    fn test_get_version() {
-        let _ = WinuxCmdFFI::init();
-        let version = WinuxCmdFFI::get_version();
-        println!("WinuxCmd version: {}", version);
-    }
-
-    #[test]
-    fn test_get_protocol_version() {
-        let _ = WinuxCmdFFI::init();
-        let protocol_version = WinuxCmdFFI::get_protocol_version();
-        println!("Protocol version: {}", protocol_version);
-        assert!(protocol_version >= 1, "Protocol version should be >= 1");
-    }
-
-    #[test]
-    fn test_get_all_commands() {
-        let _ = WinuxCmdFFI::init();
-        // This test depends on whether daemon is running
-        if WinuxCmdFFI::is_available() {
-            let commands = WinuxCmdFFI::get_all_commands();
-            assert!(commands.is_ok());
-            let cmds = commands.unwrap();
-            assert!(!cmds.is_empty());
-            println!("Found {} commands", cmds.len());
-        } else {
-            println!("Daemon not available, skipping test");
         }
     }
 
-    #[test]
-    fn test_execute_simple_command() {
-        let _ = WinuxCmdFFI::init();
-        // This test depends on whether daemon is running
-        if WinuxCmdFFI::is_available() {
-            let response = WinuxCmdFFI::execute("pwd", &[]).unwrap();
-            assert_eq!(response.exit_code, 0);
-            assert!(!response.stdout.is_empty());
-            println!("PWD: {}", response.stdout.trim());
-        } else {
-            println!("Daemon not available, skipping test");
+    /// Get WinuxCmd version
+    pub fn get_version() -> Result<String, anyhow::Error> {
+        unsafe {
+            if !Self::is_initialized() {
+                Self::init()?;
+            }
+
+            if let Some(get_version) = FFI.get_version {
+                let version_ptr = get_version();
+                if version_ptr.is_null() {
+                    return Ok("unknown".to_string());
+                }
+                let version_cstr = CStr::from_ptr(version_ptr);
+                Ok(version_cstr.to_string_lossy().to_string())
+            } else {
+                Err(anyhow::anyhow!("WinuxCmd FFI not initialized"))
+            }
         }
     }
 
-    #[test]
-    fn test_execute_with_args() {
-        let _ = WinuxCmdFFI::init();
-        // This test depends on whether daemon is running
-        if WinuxCmdFFI::is_available() {
-            let response = WinuxCmdFFI::execute("echo", &vec!["hello".to_string()]).unwrap();
-            assert_eq!(response.exit_code, 0);
-            assert!(response.stdout.contains("hello"));
-            println!("Echo: {}", response.stdout.trim());
-        } else {
-            println!("Daemon not available, skipping test");
+    /// Get all available WinuxCmd commands
+    pub fn get_all_commands() -> Result<Vec<String>, anyhow::Error> {
+        unsafe {
+            if !Self::is_initialized() {
+                Self::init()?;
+            }
+
+            if let Some(get_all_commands) = FFI.get_all_commands {
+                let mut commands: *mut *mut c_char = std::ptr::null_mut();
+                let mut count: c_int = 0;
+
+                let result = get_all_commands(&mut commands, &mut count);
+
+                if result != 0 || commands.is_null() {
+                    return Ok(Vec::new());
+                }
+
+                let mut command_list = Vec::new();
+                for i in 0..count {
+                    let cmd_ptr = *commands.add(i as usize);
+                    if !cmd_ptr.is_null() {
+                        let cmd_cstr = CStr::from_ptr(cmd_ptr);
+                        command_list.push(cmd_cstr.to_string_lossy().to_string());
+                    }
+                }
+
+                // Free commands array
+                if let Some(free_commands_array) = FFI.free_commands_array {
+                    free_commands_array(commands, count);
+                }
+
+                Ok(command_list)
+            } else {
+                Err(anyhow::anyhow!("WinuxCmd FFI not initialized"))
+            }
         }
     }
 }

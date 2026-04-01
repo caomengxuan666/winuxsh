@@ -1,13 +1,56 @@
 // Configuration management for WinSH
 use crate::error::{Result, ShellError};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// WinuxCmd configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct WinuxCmdConfig {
+    #[serde(default = "default_enable_ipc")]
+    pub enable_ipc: bool,
+
+    #[serde(default = "default_auto_start_daemon")]
+    pub auto_start_daemon: bool,
+
+    #[serde(default = "default_daemon_timeout")]
+    pub daemon_timeout: u64,
+}
+
+impl Default for WinuxCmdConfig {
+    fn default() -> Self {
+        WinuxCmdConfig {
+            enable_ipc: true,
+            auto_start_daemon: true,
+            daemon_timeout: 5,
+        }
+    }
+}
+
+fn default_enable_ipc() -> bool {
+    true
+}
+
+fn default_auto_start_daemon() -> bool {
+    true
+}
+
+fn default_daemon_timeout() -> u64 {
+    5
+}
+
 /// Terminal color configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TerminalColors {
+    #[serde(default = "default_prompt_user_color")]
     pub prompt_user: String,
+
+    #[serde(default = "default_prompt_host_color")]
     pub prompt_host: String,
+
+    #[serde(default = "default_prompt_dir_color")]
     pub prompt_dir: String,
+
+    #[serde(default = "default_prompt_symbol")]
     pub prompt_symbol: String,
 }
 
@@ -22,12 +65,39 @@ impl Default for TerminalColors {
     }
 }
 
+fn default_prompt_user_color() -> String {
+    "\x1b[1;32m".to_string()
+}
+
+fn default_prompt_host_color() -> String {
+    "\x1b[1;32m".to_string()
+}
+
+fn default_prompt_dir_color() -> String {
+    "\x1b[1;34m".to_string()
+}
+
+fn default_prompt_symbol() -> String {
+    "\x1b[0m".to_string()
+}
+
 /// Shell configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ShellConfig {
+    #[serde(default)]
     pub colors: TerminalColors,
+
+    #[serde(default = "default_prompt_format")]
     pub prompt_format: String,
+
+    #[serde(default)]
     pub plugins: Vec<String>,
+
+    #[serde(default)]
+    pub winuxcmd: WinuxCmdConfig,
+
+    #[serde(default)]
+    pub aliases: std::collections::HashMap<String, String>,
 }
 
 impl Default for ShellConfig {
@@ -36,8 +106,14 @@ impl Default for ShellConfig {
             colors: TerminalColors::default(),
             prompt_format: "%u@%h %w $ ".to_string(),
             plugins: Vec::new(),
+            winuxcmd: WinuxCmdConfig::default(),
+            aliases: std::collections::HashMap::new(),
         }
     }
+}
+
+fn default_prompt_format() -> String {
+    "%u@%h %w $ ".to_string()
 }
 
 /// Configuration manager
@@ -58,8 +134,21 @@ impl ConfigManager {
         let config_content = std::fs::read_to_string(path)
             .map_err(|e| ShellError::Config(format!("Failed to read config: {}", e)))?;
 
-        // Parse key=value format
-        for line in config_content.lines() {
+        // Try to parse as TOML first
+        if path.extension().map(|e| e == "toml").unwrap_or(false) {
+            self.config = toml::from_str(&config_content)
+                .map_err(|e| ShellError::Config(format!("Failed to parse TOML: {}", e)))?;
+        } else {
+            // Fallback to key=value format for legacy support
+            self.parse_legacy_config(&config_content)?;
+        }
+
+        Ok(self.config.clone())
+    }
+
+    /// Parse legacy key=value format
+    fn parse_legacy_config(&mut self, content: &str) -> Result<()> {
+        for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -89,13 +178,15 @@ impl ConfigManager {
                         self.config.plugins.push(value);
                     }
                     _ => {
-                        // Ignore other keys for now
+                        // Check if it's an alias
+                        if !key.contains('_') && !key.contains('.') {
+                            self.config.aliases.insert(key.to_string(), value);
+                        }
                     }
                 }
             }
         }
-
-        Ok(self.config.clone())
+        Ok(())
     }
 
     /// Get configuration
@@ -169,6 +260,9 @@ mod tests {
         let config = ShellConfig::default();
         assert_eq!(config.prompt_format, "%u@%h %w $ ");
         assert_eq!(config.plugins.len(), 0);
+        assert!(config.winuxcmd.enable_ipc);
+        assert!(config.winuxcmd.auto_start_daemon);
+        assert_eq!(config.winuxcmd.daemon_timeout, 5);
     }
 
     #[test]
@@ -185,5 +279,13 @@ mod tests {
         let manager = ConfigManager::new();
         let result = manager.parse_ansi_escape_sequences("\\x1b[1;32m");
         assert_eq!(result, "\x1b[1;32m");
+    }
+
+    #[test]
+    fn test_winuxcmd_default() {
+        let config = WinuxCmdConfig::default();
+        assert!(config.enable_ipc);
+        assert!(config.auto_start_daemon);
+        assert_eq!(config.daemon_timeout, 5);
     }
 }

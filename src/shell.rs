@@ -10,6 +10,9 @@ use std::env;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use crate::array::ArrayValue;
 use crate::config::ShellConfig;
 use crate::error::{Result, ShellError};
@@ -220,13 +223,7 @@ impl Shell {
         // Load command classification and create router
         let command_router = match crate::command_router::load_classification() {
             Ok(classification) => {
-                let router = crate::command_router::CommandRouter::new(classification);
-                println!("{} {}", "✓ Command router initialized".green(),
-                         if router.is_daemon_available() {
-                             "(WinuxCmd daemon available)"
-                         } else {
-                             "(WinuxCmd daemon not available, using PATH fallback)"
-                         });
+                let router = crate::command_router::CommandRouter::new(classification, true); // Default to enabled, will be updated by config
                 Some(router)
             }
             Err(e) => {
@@ -296,6 +293,12 @@ impl Shell {
                     "Warning:".yellow(),
                     format!("Failed to load config: {}", e)
                 );
+            } else {
+                // Update command_router with config settings
+                if let Some(router) = &mut shell.command_router {
+                    let enable_ipc = shell.config.winuxcmd.enable_ipc;
+                    router.set_enable_ipc(enable_ipc);
+                }
             }
         }
 
@@ -335,15 +338,9 @@ impl Shell {
                 .map(|e| e == "toml")
                 .unwrap_or(false)
             {
-                println!(
-                    "{} {}",
-                    "Loading shell config:".cyan(),
-                    config_path.display()
-                );
                 let mut config_manager = ConfigManager::new();
                 self.config = config_manager.load_config(&config_path)?;
             } else {
-                println!("{} {}", "Loading config:".cyan(), config_path.display());
                 self.parse_config_file(&config_path)?;
             }
         }
@@ -588,9 +585,9 @@ impl Shell {
                     }
                 }
                 crate::command_router::RouteDecision::WinuxCmdIPC(category) => {
-                    // Execute via WinuxCmd IPC
+                    // Execute via WinuxCmd DLL
                     let args: Vec<String> = all_args[1..].to_vec();
-                    return self.execute_winuxcmd_command(&clean_command, &args, category, &cmd_clone);
+                    return self.execute_winuxcmd_command(&clean_command, &args, &cmd_clone);
                 }
                 crate::command_router::RouteDecision::ExternalCommand => {
                     // Execute via PATH (fall through)
@@ -656,35 +653,8 @@ impl Shell {
         }
     }
 
-    /// Execute a command via WinuxCmd IPC
+    /// Execute WinuxCmd command via DLL
     fn execute_winuxcmd_command(
-        &mut self,
-        command: &str,
-        args: &[String],
-        category: crate::command_router::CommandCategory,
-        cmd_info: &CommandInfo,
-    ) -> Result<()> {
-        use crate::command_router::CommandCategory;
-
-        match category {
-            CommandCategory::Interactive => {
-                self.execute_interactive_winuxcmd(command, args, cmd_info)
-            }
-            CommandCategory::Complex => {
-                self.execute_complex_winuxcmd(command, args, cmd_info)
-            }
-            CommandCategory::Simple => {
-                self.execute_simple_winuxcmd(command, args, cmd_info)
-            }
-            _ => {
-                // Should not reach here, but fallback to simple
-                self.execute_simple_winuxcmd(command, args, cmd_info)
-            }
-        }
-    }
-
-    /// Execute simple WinuxCmd command via IPC
-    fn execute_simple_winuxcmd(
         &mut self,
         command: &str,
         args: &[String],
@@ -692,16 +662,18 @@ impl Shell {
     ) -> Result<()> {
         use crate::winuxcmd_ffi::WinuxCmdFFI;
 
-        debug!("Executing via WinuxCmd IPC: {} {:?}", command, args);
+        debug!("Executing via WinuxCmd DLL: {} {:?}", command, args);
 
         match WinuxCmdFFI::execute(command, args) {
             Ok(response) => {
-                // Print output
+                // Print output as raw bytes to preserve ANSI codes
                 if !response.stdout.is_empty() {
-                    print!("{}", response.stdout);
+                    let stdout_str = String::from_utf8_lossy(&response.stdout);
+                    print!("{}", stdout_str);
                 }
                 if !response.stderr.is_empty() {
-                    eprint!("{}", response.stderr);
+                    let stderr_str = String::from_utf8_lossy(&response.stderr);
+                    eprint!("{}", stderr_str);
                 }
 
                 self.last_exit_code = response.exit_code;
@@ -713,37 +685,12 @@ impl Shell {
                 Ok(())
             }
             Err(e) => {
-                // IPC failed, fall back to external command
-                eprintln!("{} {}", "Warning:".yellow(), format!("WinuxCmd IPC failed: {}", e));
+                // DLL execution failed, fall back to external command
+                eprintln!("{} {}", "Warning:".yellow(), format!("WinuxCmd DLL failed: {}", e));
                 eprintln!("Falling back to external command execution");
                 self.execute_external_command_fallback(command, args, cmd_info)
             }
         }
-    }
-
-    /// Execute interactive WinuxCmd command via IPC
-    fn execute_interactive_winuxcmd(
-        &mut self,
-        command: &str,
-        args: &[String],
-        cmd_info: &CommandInfo,
-    ) -> Result<()> {
-        // Interactive commands (less, top) need special TTY handling
-        // For now, use simple execution but be aware of TTY requirements
-        eprintln!("{} {}", "Info:".blue(), format!("Executing interactive command '{}' via IPC", command));
-        self.execute_simple_winuxcmd(command, args, cmd_info)
-    }
-
-    /// Execute complex WinuxCmd command via IPC
-    fn execute_complex_winuxcmd(
-        &mut self,
-        command: &str,
-        args: &[String],
-        cmd_info: &CommandInfo,
-    ) -> Result<()> {
-        // Complex commands (sed, xargs) might need special parsing
-        // For now, use simple execution
-        self.execute_simple_winuxcmd(command, args, cmd_info)
     }
 
     /// Execute command via external PATH as fallback
@@ -792,12 +739,254 @@ impl Shell {
 
     /// Execute a pipeline
     pub fn execute_pipeline(&mut self, cmds: &[CommandInfo]) -> Result<()> {
-        // Simplified pipeline execution
-        // TODO: Implement proper pipeline with process pipes
-        for cmd in cmds {
-            self.execute_single_command(cmd)?;
+        log::debug!("execute_pipeline: {} commands", cmds.len());
+        
+        if cmds.is_empty() {
+            return Ok(());
         }
+
+        if cmds.len() == 1 {
+            // Single command, no pipeline needed
+            return self.execute_single_command(&cmds[0]);
+        }
+
+        // TEMPORARY FIX: Use temp file as pipe buffer for debugging
+        // This will help us understand if the problem is pipe connection or something else
+        let temp_pipe_file = format!("winuxsh_pipe_{}.tmp", std::process::id());
+        
+        log::debug!("Pipeline: Creating temp file: {}", temp_pipe_file);
+        
+        // Execute first command and redirect output to temp file
+        let mut first_cmd = cmds[0].clone();
+        first_cmd.stdout_redir = Some(temp_pipe_file.clone());
+        first_cmd.stdout_append = false;
+        log::debug!("Pipeline: Executing first command: {:?} -> {}", first_cmd.args, temp_pipe_file);
+        
+        // Use try-catch to prevent any error from killing the shell
+        if let Err(e) = self.execute_single_command(&first_cmd) {
+            log::error!("Pipeline: First command failed: {}", e);
+            // Don't return error, just continue
+        }
+        
+        // Execute remaining commands, reading from temp file
+        for i in 1..cmds.len() {
+            let mut cmd = cmds[i].clone();
+            cmd.stdin_redir = Some(temp_pipe_file.clone());
+            log::debug!("Pipeline: Executing command {}: {:?} < {}", i, cmd.args, temp_pipe_file);
+            
+            if let Err(e) = self.execute_single_command(&cmd) {
+                log::error!("Pipeline: Command {} failed: {}", i, e);
+                // Don't return error, just continue
+            }
+        }
+        
+        // Clean up temp file
+        log::debug!("Pipeline: Cleaning up temp file: {}", temp_pipe_file);
+        let _ = std::fs::remove_file(&temp_pipe_file);
+        
         Ok(())
+    }
+
+    /// Execute a real pipeline with Windows pipes
+    fn execute_real_pipeline(&mut self, cmds: &[CommandInfo]) -> Result<()> {
+        use std::process::{Child, Stdio, Command};
+
+        if cmds.is_empty() {
+            return Ok(());
+        }
+
+        // Convert environment variables
+        let env_vars: Vec<(String, String)> = self
+            .env_vars
+            .iter()
+            .filter_map(|(k, v)| {
+                if let ArrayValue::String(ref s) = v {
+                    Some((k.clone(), s.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut children: Vec<Child> = Vec::new();
+        let mut prev_stdout: Option<std::process::ChildStdout> = None;
+
+        for (i, cmd) in cmds.iter().enumerate() {
+            let is_first = i == 0;
+            let is_last = i == cmds.len() - 1;
+
+            // Get command name and args
+            if cmd.args.is_empty() {
+                return Err(crate::error::ShellError::Parse("Empty command in pipeline".to_string()));
+            }
+
+            let cmd_name = &cmd.args[0];
+            let cmd_args = &cmd.args[1..];
+
+            // Check if this is a builtin command - handle specially
+            let is_builtin = if let Some(router) = &self.command_router {
+                match router.route_command(cmd_name) {
+                    crate::command_router::RouteDecision::Builtin => true,
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            // For now, allow builtin commands to pass through (they will fail, but won't block other commands)
+            // TODO: Implement proper builtin command pipeline support
+            if is_builtin {
+                // For builtin commands in pipelines, just continue - they will fail to find the executable
+            }
+
+            // Find command path for external commands
+            let cmd_path = match self.find_command_in_path(cmd_name) {
+                Some(path) => path,
+                None => {
+                    return Err(crate::error::ShellError::CommandNotFound(format!(
+                        "Command '{}' not found",
+                        cmd_name
+                    )));
+                }
+            };
+
+            let program = cmd_path.to_string_lossy().to_string();
+
+            // Create process
+            let mut process = Command::new(&program);
+            process.args(cmd_args);
+            process.envs(env_vars.iter().cloned());
+            process.current_dir(&self.current_dir);
+
+            // Set up stdin - CRITICAL: use from_stdin for pipe connections
+            if let Some(stdout) = prev_stdout.take() {
+                process.stdin(Stdio::from(stdout));
+            } else if let Some(ref stdin_file) = cmd.stdin_redir {
+                let file = std::fs::File::open(stdin_file)?;
+                process.stdin(Stdio::from(file));
+            } else {
+                process.stdin(Stdio::inherit());
+            }
+
+            // Set up stdout - CRITICAL: must be piped for non-last commands
+            if is_last {
+                // Last command: stdout goes to terminal or file
+                if let Some(ref stdout_file) = cmd.stdout_redir {
+                    let file = if cmd.stdout_append {
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .create(true)
+                            .open(stdout_file)?
+                    } else {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(stdout_file)?
+                    };
+                    process.stdout(Stdio::from(file));
+                } else {
+                    process.stdout(Stdio::inherit());
+                }
+            } else {
+                // Not last command: stdout MUST be piped for pipe connections
+                process.stdout(Stdio::piped());
+            }
+
+            // Set up stderr
+            if let Some(ref stderr_file) = cmd.stderr_redir {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(stderr_file)?;
+                process.stderr(Stdio::from(file));
+            } else if cmd.stderr_to_stdout {
+                process.stderr(Stdio::inherit());
+            } else {
+                process.stderr(Stdio::inherit());
+            }
+
+            // Create new process group on Windows to prevent Ctrl+C from killing the shell
+            // CRITICAL: This must be applied to ALL child processes
+            #[cfg(windows)]
+            {
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+                process.creation_flags(CREATE_NEW_PROCESS_GROUP);
+            }
+
+            // Spawn process
+            let mut child = process.spawn()
+                .map_err(|e| crate::error::ShellError::CommandNotFound(format!(
+                    "Failed to execute '{}': {}",
+                    cmd_name, e
+                )))?;
+
+            // Debug output
+            log::debug!("Spawned process '{}' (PID: {:?}) in pipeline (is_last: {})", 
+                       cmd_name, child.id(), is_last);
+
+            // Save stdout for next command (if not last)
+            if !is_last {
+                prev_stdout = child.stdout.take();
+            }
+
+            children.push(child);
+        }
+
+        // Close the previous stdout to signal EOF to the next process
+        drop(prev_stdout);
+
+        // Wait for all processes to complete
+        let mut last_exit_code = 0;
+        for mut child in children {
+            let status = child.wait()
+                .map_err(|e| crate::error::ShellError::CommandNotFound(format!(
+                    "Failed to wait for process: {}", e
+                )))?;
+
+            last_exit_code = status.code().unwrap_or(1);
+        }
+
+        self.last_exit_code = last_exit_code;
+        Ok(())
+    }
+
+    /// Find command in PATH (helper method for pipeline)
+    fn find_command_in_path(&self, cmd: &str) -> Option<PathBuf> {
+        if cmd.contains('\\') || cmd.contains('/') {
+            // Full path provided
+            let path = PathBuf::from(cmd);
+            if path.exists() {
+                return Some(path);
+            }
+            return None;
+        }
+
+        // Search in PATH
+        if let Ok(path_env) = std::env::var("PATH") {
+            for path in env::split_paths(&path_env) {
+                let exe_path = path.join(&format!("{}.exe", cmd));
+                if exe_path.exists() {
+                    return Some(exe_path);
+                }
+                let bat_path = path.join(&format!("{}.bat", cmd));
+                if bat_path.exists() {
+                    return Some(bat_path);
+                }
+                let cmd_path = path.join(&format!("{}.cmd", cmd));
+                if cmd_path.exists() {
+                    return Some(cmd_path);
+                }
+                // Also check for files without extension on Unix-like systems
+                let direct_path = path.join(cmd);
+                if direct_path.exists() {
+                    return Some(direct_path);
+                }
+            }
+        }
+
+        None
     }
 
     /// Expand wildcards in arguments

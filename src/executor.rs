@@ -6,6 +6,9 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use crate::array::ArrayValue;
 use crate::error::{Result, ShellError};
 use crate::tokenizer::CommandInfo;
@@ -151,18 +154,49 @@ impl Executor {
                 ))),
             }
         } else {
-            match command.status() {
-                Ok(status) => {
-                    let code = status.code().unwrap_or(1);
-                    if !status.success() {
-                        eprintln!("Command exited with status code: {}", code);
+            // Create new process group on Windows to prevent Ctrl+C from killing the shell
+            #[cfg(windows)]
+            {
+                // Use multiple flags for better signal isolation
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                const DETACHED_PROCESS: u32 = 0x00000008;
+                
+                command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+            }
+
+            // Use spawn() instead of status() for better signal handling
+            match command.spawn() {
+                Ok(mut child) => {
+                    // Set current child PID for Ctrl+C handling
+                    #[cfg(windows)]
+                    crate::set_current_child_pid(child.id());
+
+                    // Wait for child to complete
+                    let status = child.wait();
+
+                    // Clear current child PID
+                    #[cfg(windows)]
+                    crate::clear_current_child_pid();
+
+                    match status {
+                        Ok(exit_status) => {
+                            let code = exit_status.code().unwrap_or(1);
+                            if !exit_status.success() {
+                                eprintln!("Command exited with status code: {}", code);
+                            }
+                            Ok(code)
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to wait for command: {}", e);
+                            Ok(1)
+                        }
                     }
-                    Ok(code)
                 }
-                Err(e) => Err(ShellError::CommandNotFound(format!(
-                    "Failed to execute '{}': {}",
-                    cmd, e
-                ))),
+                Err(e) => {
+                    eprintln!("Command execution error: {}", e);
+                    Ok(1) // Return error code but don't propagate the error
+                },
             }
         }
     }

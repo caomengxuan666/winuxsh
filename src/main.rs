@@ -8,6 +8,87 @@
 // - Modular architecture following Rust best practices
 
 use anyhow::Result;
+
+// Win32 API for Ctrl+C handling
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(windows)]
+static mut CURRENT_CHILD_PID: u32 = 0;
+
+#[cfg(windows)]
+static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::BOOL;
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    SetConsoleCtrlHandler, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, PHANDLER_ROUTINE,
+};
+
+#[cfg(windows)]
+unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
+    match ctrl_type {
+        CTRL_C_EVENT => {
+            // Ctrl+C received
+            CTRL_C_RECEIVED.store(true, Ordering::SeqCst);
+            
+            // If there's a child process running, try to terminate it
+            if CURRENT_CHILD_PID != 0 {
+                // Terminate the child process only
+                use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                let handle = OpenProcess(PROCESS_TERMINATE, 0, CURRENT_CHILD_PID);
+                if !handle.is_null() {
+                    TerminateProcess(handle, 1);
+                }
+                return 1; // Signal handled
+            }
+            
+            // No child process, let the default handler run
+            return 0;
+        }
+        _ => 0, // Let default handlers run for other signals
+    }
+}
+#[cfg(windows)]
+pub fn setup_ctrl_c_handler() {
+    unsafe {
+        if SetConsoleCtrlHandler(Some(ctrl_handler), 1) == 0 {
+            eprintln!("Warning: Failed to set Ctrl+C handler");
+        } else {
+            log::debug!("Ctrl+C handler installed successfully");
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn set_current_child_pid(pid: u32) {
+    unsafe {
+        CURRENT_CHILD_PID = pid;
+    }
+}
+
+#[cfg(windows)]
+pub fn clear_current_child_pid() {
+    unsafe {
+        CURRENT_CHILD_PID = 0;
+    }
+}
+
+#[cfg(windows)]
+pub fn is_ctrl_c_received() -> bool {
+    CTRL_C_RECEIVED.swap(false, Ordering::SeqCst)
+}
+
+#[cfg(not(windows))]
+pub fn setup_ctrl_c_handler() {}
+#[cfg(not(windows))]
+pub fn set_current_child_pid(_: u32) {}
+#[cfg(not(windows))]
+pub fn clear_current_child_pid() {}
+#[cfg(not(windows))]
+pub fn is_ctrl_c_received() -> bool { false }
+
 use colored::Colorize;
 use reedline::Signal;
 use std::env;
@@ -49,14 +130,19 @@ fn main() {
 fn run() -> Result<()> {
     // Initialize logging (default to error level only)
     env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Error)  // 默认只显示error
-        .parse_env("RUST_LOG")  // 但允许通过RUST_LOG环境变量覆盖
+        .filter_level(log::LevelFilter::Error)
+        .parse_env("RUST_LOG")
         .init();
 
-    // Initialize WinuxCmd daemon
-    if let Err(e) = initialize_winuxcmd_daemon() {
-        eprintln!("{} {}", "Warning:".yellow(), format!("Failed to initialize WinuxCmd daemon: {}", e));
+    // Setup Ctrl+C handler
+    setup_ctrl_c_handler();
+
+    // Initialize WinuxCmd FFI
+    if let Err(e) = initialize_winuxcmd() {
+        eprintln!("Warning: Failed to initialize WinuxCmd: {}", e);
     }
+
+    // Parse command line arguments
 
     let args: Vec<String> = env::args().collect();
 
@@ -163,68 +249,13 @@ impl Shell {
 }
 
 /// Initialize WinuxCmd daemon
-fn initialize_winuxcmd_daemon() -> anyhow::Result<()> {
-    println!("{}", "Initializing WinuxCmd daemon...".blue());
-
-    // Initialize FFI first
+fn initialize_winuxcmd() -> anyhow::Result<()> {
+    // Initialize WinuxCmd FFI (direct DLL execution, no daemon needed)
     WinuxCmdFFI::init().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Get version after FFI initialization
-    println!("{} {}", "WinuxCmd version:".blue(), WinuxCmdFFI::get_version());
-    println!("{} {}", "Protocol version:".blue(), WinuxCmdFFI::get_protocol_version());
-
-    // Check if daemon is available
-    if WinuxCmdFFI::is_available() {
-        println!("{}", "✓ WinuxCmd daemon is available".green());
+    if WinuxCmdFFI::is_initialized() {
         return Ok(());
     }
 
-    println!("{}", "✗ WinuxCmd daemon is not available, starting it...".yellow());
-
-    // Find daemon executable in multiple locations
-    let possible_paths = vec![
-        std::path::PathBuf::from("utils/winuxcmd/winuxcmd.exe"),
-        std::path::PathBuf::from("./winuxcmd.exe"),
-        std::path::PathBuf::from("../utils/winuxcmd/winuxcmd.exe"),
-    ];
-
-    let daemon_exe = possible_paths
-        .into_iter()
-        .find(|path| path.exists())
-        .ok_or_else(|| anyhow::anyhow!("WinuxCmd executable not found in any standard location"))?;
-
-    println!("{} {}", "Starting daemon from:".blue(), daemon_exe.display());
-
-    // Start daemon as background process
-    // Use detached process so it continues running when shell exits
-    let mut daemon_cmd = std::process::Command::new(&daemon_exe);
-    daemon_cmd.arg("--daemon");
-    daemon_cmd.stdout(std::process::Stdio::null());  // Discard stdout
-    daemon_cmd.stderr(std::process::Stdio::null());  // Discard stderr
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        daemon_cmd.creation_flags(0x00000008);  // DETACHED_PROCESS
-    }
-
-    let _child = daemon_cmd.spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to start daemon: {}", e))?;
-
-    println!("{} {}", "Waiting for daemon to start...".blue(), "(timeout: 5s)");
-
-    // Wait for daemon to start (give it 5 seconds)
-    let timeout = std::time::Duration::from_secs(5);
-    let start = std::time::Instant::now();
-
-    while start.elapsed() < timeout {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if WinuxCmdFFI::is_available() {
-            let elapsed = start.elapsed().as_millis();
-            println!("{} {} ({:.0}ms)", "✓ WinuxCmd daemon started successfully".green(), 
-                     "ready in", elapsed);
-            return Ok(());
-        }
-    }
-
-    Err(anyhow::anyhow!("Daemon failed to start within 5 second timeout"))
+    Err(anyhow::anyhow!("Failed to initialize WinuxCmd FFI. Please ensure winuxcore.dll is available."))
 }
