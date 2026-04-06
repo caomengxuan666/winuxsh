@@ -81,6 +81,32 @@ fn default_prompt_symbol() -> String {
     "\x1b[0m".to_string()
 }
 
+/// Configuration for the pluggable completion system.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompletionsConfig {
+    /// Directories that contain per-command completion definition files (*.toml / *.bash).
+    /// Defaults to `~/.winsh/completions` when empty.
+    #[serde(default)]
+    pub completion_dirs: Vec<String>,
+
+    /// Enable the built-in command-name completion plugin (default: true).
+    #[serde(default = "default_true")]
+    pub enable_command_completion: bool,
+}
+
+impl Default for CompletionsConfig {
+    fn default() -> Self {
+        CompletionsConfig {
+            completion_dirs: Vec::new(),
+            enable_command_completion: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Shell configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShellConfig {
@@ -98,6 +124,9 @@ pub struct ShellConfig {
 
     #[serde(default)]
     pub aliases: std::collections::HashMap<String, String>,
+
+    #[serde(default)]
+    pub completions: CompletionsConfig,
 }
 
 impl Default for ShellConfig {
@@ -108,6 +137,7 @@ impl Default for ShellConfig {
             plugins: Vec::new(),
             winuxcmd: WinuxCmdConfig::default(),
             aliases: std::collections::HashMap::new(),
+            completions: CompletionsConfig::default(),
         }
     }
 }

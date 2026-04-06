@@ -1,0 +1,28 @@
+Warning: Failed to initialize WinuxCmd: Failed to load winuxcore.dll from any location. Tried:
+  - D:\code\RustFiles\winuxsh\target\debug\winuxcmd/winuxcore.dll: LoadLibraryExW failed
+  - D:\code\RustFiles\winuxsh\target\debug\../utils/winuxcmd/winuxcore.dll: LoadLibraryExW failed
+  - D:\code\RustFiles\winuxsh\target\debug\../../utils/winuxcmd/winuxcore.dll: LoadLibraryExW failed
+  - D:\code\RustFiles\winuxsh\target\debug\winuxcore.dll: LoadLibraryExW failed
+
+[DBG] Loaded completions from "D:/shellTools/fd-v10.4.2-x86_64-pc-windows-msvc/autocomplete", total 1 definition(s)
+[DBG] Loaded completions from "D:/shellTools/bat-v0.26.1-x86_64-pc-windows-msvc/autocomplete", total 2 definition(s)
+[DBG] Loaded completions from "D:/shellTools/btm/completion", total 3 definition(s)
+[DBG] Loaded completions from "D:/shellTools/ripgrep-15.1.0-x86_64-pc-windows-msvc/complete", total 4 definition(s)
+[DBG] Loaded completions from "D:/shellTools/yazi-x86_64-pc-windows-msvc/completions", total 5 definition(s)
+[DBG] Loaded completions from "D:/shellTools/Zoxide/completions", total 6 definition(s)
+[DBG] Loaded completions from "C:\\Users\\hzz\\.winsh\\completions", total 6 definition(s)
+[DBG] All loaded command definitions: ["rg", "zoxide", "bat", "btm", "yazi", "fd"]
+[?25l[30;1H[30;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[30;81H8[0m[0m7[37m[0m8[?25h[?25l[8;1H
+[7;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m[0m[0m[37m$cacheDir = "$env:USERPROFILE\.winsh\completions\cache"[0m78[?25h
+Error: Command not found: Command '$cacheDir' not found
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[?25l[8;1H
+[7;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m[0m[0m[37mGet-ChildItem $cacheDir -Filter "*.parsed.toml" | Select-Object Name, Length[0m78[?25h
+Error: Command not found: Command 'Get-ChildItem' not found
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m
+[?25l[8;1H[8;1H[J[38;5;10m[1;32mhzz[0m@[1;36mDESKTOP-ODABH49 [1;34mD:\code\RustFiles\winuxsh[0m$ [38;5;14m〉[38;5;5m7[8;80H8[0m[0m7[37m[0m8[?25h[J[37m[0m

@@ -13,6 +13,13 @@ use crate::array::ArrayValue;
 use crate::error::{Result, ShellError};
 use crate::tokenizer::CommandInfo;
 
+#[derive(Debug, Default, Clone)]
+pub struct CapturedExecution {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
 /// Executor for external commands
 pub struct Executor {
     env_vars: Vec<(String, String)>,
@@ -41,6 +48,33 @@ impl Executor {
 
     /// Execute an external command
     pub fn execute(&self, cmd: &str, args: &[String], cmd_info: &CommandInfo) -> Result<i32> {
+        let mut result = self.execute_internal(cmd, args, cmd_info, false)?;
+        if !result.stderr.is_empty() {
+            eprint!("{}", String::from_utf8_lossy(&result.stderr));
+        }
+        if result.exit_code != 0 {
+            eprintln!("Command exited with status code: {}", result.exit_code);
+        }
+        Ok(result.exit_code)
+    }
+
+    /// Execute an external command and capture output.
+    pub fn execute_capture(
+        &self,
+        cmd: &str,
+        args: &[String],
+        cmd_info: &CommandInfo,
+    ) -> Result<CapturedExecution> {
+        self.execute_internal(cmd, args, cmd_info, true)
+    }
+
+    fn execute_internal(
+        &self,
+        cmd: &str,
+        args: &[String],
+        cmd_info: &CommandInfo,
+        capture_output: bool,
+    ) -> Result<CapturedExecution> {
         let cmd_path = self.find_command_in_path(cmd)?;
 
         let program = match cmd_path {
@@ -69,7 +103,6 @@ impl Executor {
             ("powershell.exe".to_string(), ps_args)
         } else {
             // For .exe, .bat, .cmd, and other executables, execute directly
-            // The OS will handle the execution
             let exe_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
             (program.to_string_lossy().to_string(), exe_args)
         };
@@ -77,13 +110,16 @@ impl Executor {
         let mut command = Command::new(&actual_program);
         command.args(&actual_args);
 
-        // Explicitly set stdio to inherit for streaming output
-        // This prevents buffering issues with large outputs like tree
         command.stdin(Stdio::inherit());
-        command.stdout(Stdio::inherit());
-        command.stderr(Stdio::inherit());
+        if capture_output {
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+        } else {
+            command.stdout(Stdio::inherit());
+            command.stderr(Stdio::inherit());
+        }
 
-        // Handle redirections - override inherited stdio if specified
+        // Handle redirections - override inherited/captured stdio if specified
         if let Some(ref stdin_file) = cmd_info.stdin_redir {
             let file = std::fs::File::open(stdin_file)?;
             command.stdin(Stdio::from(file));
@@ -137,7 +173,6 @@ impl Executor {
             }
         }
 
-        // Override inherited stdio if redirection is specified
         if let Some(file) = stdout_handle {
             command.stdout(Stdio::from(file));
         }
@@ -151,9 +186,12 @@ impl Executor {
                 Ok(child) => {
                     let pid = child.id();
                     let cmd_str = cmd_info.args.join(" ");
-                    // TODO: Add to job manager
                     println!("Background job started: [{}] {}", pid, cmd_str);
-                    Ok(0)
+                    Ok(CapturedExecution {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        exit_code: 0,
+                    })
                 }
                 Err(e) => Err(ShellError::CommandNotFound(format!(
                     "Failed to start background process: {}",
@@ -161,46 +199,60 @@ impl Executor {
                 ))),
             }
         } else {
-            // Create new process group on Windows to prevent Ctrl+C from killing the shell
             #[cfg(windows)]
             {
-                // Use multiple flags for better signal isolation
                 const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
                 command.creation_flags(CREATE_NEW_PROCESS_GROUP);
             }
 
-            // Use spawn() instead of status() for better signal handling
             match command.spawn() {
                 Ok(mut child) => {
-                    // Set current child PID for Ctrl+C handling
                     #[cfg(windows)]
                     crate::set_current_child_pid(child.id());
 
-                    // Wait for child to complete
-                    let status = child.wait();
+                    let output = if capture_output {
+                        match child.wait_with_output() {
+                            Ok(output) => Ok(CapturedExecution {
+                                stdout: output.stdout,
+                                stderr: output.stderr,
+                                exit_code: output.status.code().unwrap_or(1),
+                            }),
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        match child.wait() {
+                            Ok(exit_status) => Ok(CapturedExecution {
+                                stdout: Vec::new(),
+                                stderr: Vec::new(),
+                                exit_code: exit_status.code().unwrap_or(1),
+                            }),
+                            Err(e) => Err(e),
+                        }
+                    };
 
-                    // Clear current child PID
                     #[cfg(windows)]
                     crate::clear_current_child_pid();
 
-                    match status {
-                        Ok(exit_status) => {
-                            let code = exit_status.code().unwrap_or(1);
-                            if !exit_status.success() {
-                                eprintln!("Command exited with status code: {}", code);
-                            }
-                            Ok(code)
-                        }
+                    match output {
+                        Ok(result) => Ok(result),
                         Err(e) => {
                             eprintln!("Failed to wait for command: {}", e);
-                            Ok(1)
+                            Ok(CapturedExecution {
+                                stdout: Vec::new(),
+                                stderr: Vec::new(),
+                                exit_code: 1,
+                            })
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("Command execution error: {}", e);
-                    Ok(1) // Return error code but don't propagate the error
-                },
+                    Ok(CapturedExecution {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        exit_code: 1,
+                    })
+                }
             }
         }
     }

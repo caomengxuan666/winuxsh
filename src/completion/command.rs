@@ -141,7 +141,10 @@ mod tests {
     fn test_command_exists() {
         assert!(CommandCompleter::command_exists("ls"));
         assert!(CommandCompleter::command_exists("cd"));
-        // Most systems have these commands
-        assert!(CommandCompleter::command_exists("cmd") || CommandCompleter::command_exists("powershell"));
+
+        // Verify PATH command lookup without hardcoding platform-specific binaries.
+        if let Some(any_path_cmd) = CommandCompleter::get_path_commands().first() {
+            assert!(CommandCompleter::command_exists(any_path_cmd));
+        }
     }
 }

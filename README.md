@@ -1,11 +1,14 @@
 ﻿# WinSH - Windows Shell
 
+[中文](README-zh.md) | English
+
 A modern Unix-style command-line shell for Windows, written in Rust. WinSH provides a powerful shell experience with full compatibility with Windows commands and Unix-style tools.
 
 ## Features
 
 ### Core Functionality
 - **860+ Command Completion**: Auto-discovery of commands from PATH
+- **Command Completion** : via config file auto build command completion
 - **Wildcard Expansion**: Full support for `*`, `?`, `[]` patterns
 - **Command Substitution**: Execute commands within commands using `$(command)`
 - **Script Execution**: Run `.sh` scripts with full shell support
@@ -18,33 +21,39 @@ A modern Unix-style command-line shell for Windows, written in Rust. WinSH provi
 - **Environment Variables**: Full support for environment variable management
 - **Emacs Mode**: Powerful keybindings for efficient editing
 
+### Completion System
+- **Flag Completion with Descriptions**: Tab-complete flags with inline usage hints (e.g. `--regexp   A pattern to search for.`) — see [TOML Definition Format](#completion-definition-files-toml-format)
+- **Bash Script Auto-Import**: Scans `_cmd.bash` / `cmd.bash` files in completion dirs and parses them automatically — see [Bash Auto-Import](#bash-completion-script-auto-import)
+- **Auto-Description Enrichment**: Runs `cmd -h` after first load to extract flag descriptions; persisted to cache — see [Auto-Description](#auto-description-enrichment-cmd--h)
+- **Environment Variable Completion**: Type `$` to Tab-complete environment variables — see [Env Var Completion](#environment-variable-completion)
+- **3-Layer Cache**: In-memory → disk (`.parsed.toml`) → subprocess, with mtime-based invalidation
+- **Multiple Completion Dirs**: Configure multiple directories in `~/.winshrc.toml`
+- **ListMenu Popup**: Floating completion menu with aligned descriptions
+
 ### Built-in Commands
-- `ls` - List directory contents
-- `cd` - Change directory
-- `pwd` - Print working directory
-- `echo` - Display text
-- `cat` - Display file contents
-- `grep` - Search text
-- `find` - Find files
-- `cp` - Copy files
-- `mv` - Move/rename files
-- `rm` - Remove files
-- `mkdir` - Create directories
-- `jobs` - List background jobs
-- `fg` - Bring job to foreground
-- `bg` - Send job to background
-- `set` - Set environment variables
-- `unset` - Unset variables
-- `export` - Export variables
-- `env` - Display environment
-- `help` - Display help
-- `history` - Command history
-- `alias` - Create command aliases
-- `unalias` - Remove aliases
-- `source` - Execute script in current shell
-- `array` - Array operations
-- `plugin` - Plugin management
-- `theme` - Theme management
+
+| Command | Description |
+|---------|-------------|
+| `ls` | List directory contents |
+| `cd` | Change directory |
+| `pwd` | Print working directory |
+| `echo` | Display text |
+| `cat` | Display file contents |
+| `grep` | Search text |
+| `find` | Find files |
+| `cp` | Copy files |
+| `mv` | Move/rename files |
+| `rm` | Remove files |
+| `mkdir` | Create directories |
+| `jobs` | List background jobs |
+| `fg` / `bg` | Foreground / background job control |
+| `set` / `unset` / `export` | Variable management |
+| `alias` / `unalias` | Command aliases |
+| `array` | Array operations |
+| `plugin` | Plugin management |
+| `theme` | Theme management |
+| `history` | Command history |
+| `source` | Execute script in current shell |
 
 ## Installation
 
@@ -137,8 +146,16 @@ array len colors
 theme list
 theme set cyberpunk
 
-# Plugin management
-plugin list
+# Tab completion with descriptions
+rg -<Tab>
+# 0: --regexp       A pattern to search for.
+# 1: --file         Search for patterns from the given file.
+# 2: --after-context   Show NUM lines after each match.
+# ...
+
+# Environment variable completion
+echo $WIN<Tab>
+# → $WINDIR, $WINUXSH_*, ...
 ```
 
 ## Architecture
@@ -147,19 +164,27 @@ WinSH follows a modular architecture with clear separation of concerns:
 
 ```
 src/
-├── main.rs           # Entry point and REPL loop
-├── shell.rs          # Shell state and execution
-├── tokenizer.rs      # Lexical analysis
-├── parser.rs         # Syntax analysis
-├── executor.rs       # Command execution
-├── builtins.rs       # Built-in commands
-├── array.rs          # Array system
-├── plugin.rs         # Plugin system
-├── theme.rs          # Theme management
-├── config.rs         # Configuration
-├── job.rs            # Job control
-├── error.rs          # Error handling
-└── oh_my_winuxsh.rs  # Oh-My-Winuxsh plugin
+├── main.rs               # Entry point and REPL loop
+├── shell.rs              # Shell state and execution
+├── tokenizer.rs          # Lexical analysis
+├── parser.rs             # Syntax analysis
+├── executor.rs           # Command execution
+├── builtins.rs           # Built-in commands
+├── array.rs              # Array system
+├── plugin.rs             # Plugin system
+├── theme.rs              # Theme management
+├── config.rs             # Configuration
+├── job.rs                # Job control
+├── error.rs              # Error handling
+├── oh_my_winuxsh.rs      # Oh-My-Winuxsh plugin
+└── completion/
+    ├── mod.rs            # CompletionContext / CompletionResult
+    ├── completer.rs      # WinuxshCompleter (reedline integration)
+    ├── external.rs       # External command completion plugin (TOML + bash + cache)
+    ├── bash_import.rs    # Bash completion script parser
+    ├── command.rs        # Command name completion
+    ├── path.rs           # Path completion
+    └── variables.rs      # Environment variable completion
 ```
 
 
@@ -177,7 +202,89 @@ current_theme = "default"
 [aliases]
 ll = "ls -la"
 la = "ls -a"
+
+[completions]
+# Multiple completion definition directories
+completion_dirs = [
+    "D:/shellTools/ripgrep/complete",
+    "D:/shellTools/fd/autocomplete",
+    "D:/shellTools/bat/autocomplete",
+]
 ```
+
+### Completion Definition Files (TOML Format)
+
+Create `<command>.toml` inside any completion directory:
+
+```toml
+command = "mytool"
+description = "My custom tool"
+
+[[flags]]
+short = "-v"
+long = "--verbose"
+description = "Enable verbose output"
+
+[[flags]]
+long = "--output"
+description = "Output file path"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+long = "--format"
+description = "Output format"
+takes_value = true
+values = ["json", "yaml", "toml"]
+```
+
+### Bash Completion Script Auto-Import
+
+At startup WinSH scans all configured completion directories for bash completion scripts (`_cmd.bash` / `cmd.bash`) and parses them automatically.
+
+**How it works:**
+
+1. Scan for `*.bash` files in each completion directory
+2. Parse `opts="..."` fields to extract short (`-x`) and long (`--xxx`) flags
+3. Serialize the result to `~/.winsh/completions/cache/<cmd>.parsed.toml` (invalidated when the bash file's mtime changes)
+4. Subsequent starts read from cache — no re-parsing
+
+**Where to get the scripts:** Most modern CLI tools (ripgrep, fd, bat, btm, …) ship a `complete/` or `autocomplete/` directory in their release archive containing bash completion scripts. Point `completion_dirs` at those directories.
+
+> If both `rg.toml` and `_rg.bash` exist in a directory, the TOML file takes priority and the bash script is skipped.
+
+### Auto-Description Enrichment (`cmd -h`)
+
+Bash scripts carry no description text. After loading all definitions WinSH automatically runs `cmd -h` for every command that has flags without descriptions.
+
+**How it works:**
+
+1. After all completion definitions are loaded, run `cmd -h` for each command missing descriptions
+2. Parse help output — flag lines are identified by the following format:
+   ```
+     -s, --case-sensitive             Description text
+         --long-only                  Description text
+     -e, --regexp=PATTERN             Description text
+   ```
+   Two or more consecutive spaces separate the flag name(s) from the description.
+3. Write extracted descriptions into `FlagDef.description`
+4. **Persist to cache**: overwrite the `.parsed.toml` with the enriched definitions — next start reads from cache without re-running `cmd -h`
+
+### Environment Variable Completion
+
+Type a `$` prefix and press Tab to complete environment variables:
+
+```bash
+$ echo $PATH<Tab>
+$ echo $HOME<Tab>
+$ echo $USERPROFILE<Tab>
+
+# Partial match also works
+$ echo $WIN<Tab>
+# → $WINDIR, $WINUXSH_*, ...
+```
+
+Variables set via `export` / `set` as well as system environment variables are all available for completion.
 
 ## Theme System
 
@@ -310,6 +417,11 @@ MIT License - see LICENSE file for details
 - Full wildcard expansion
 - Command substitution
 - Script execution
+- TOML-driven external command completion
+- Bash completion script auto-import
+- Flag descriptions from `cmd -h` with disk cache
+- ListMenu popup with aligned descriptions
+- Multi-directory completion config
 
 ### MVP5
 - Job control

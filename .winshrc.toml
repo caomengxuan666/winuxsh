@@ -12,3 +12,13 @@ enable_dll = true
 ll = "ls -la"
 la = "ls -a"
 l = "ls -CF"
+
+[completions]
+completion_dirs = [
+    "D:/shellTools/fd-v10.4.2-x86_64-pc-windows-msvc/autocomplete",
+    "D:/shellTools/bat-v0.26.1-x86_64-pc-windows-msvc/autocomplete",
+    "D:/shellTools/btm/completion",
+    "D:/shellTools/ripgrep-15.1.0-x86_64-pc-windows-msvc/complete",
+    "D:/shellTools/yazi-x86_64-pc-windows-msvc/completions",
+    "D:/shellTools/Zoxide/completions",
+]

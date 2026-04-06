@@ -5,17 +5,17 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use reedline::{Completer, Span, Suggestion};
-use crate::completion::{CompletionContext, CompletionResult};
-use crate::completion::command::CommandCompleter;
+use crate::completion::{CompletionContext, CompletionPlugin, CompletionResult};
 use crate::completion::path::PathCompleter;
 use crate::completion::variables::VariableCompleter;
 use crate::array::ArrayValue;
 
 /// State shared with completer
-#[derive(Clone)]
 pub struct CompletionState {
     pub current_dir: PathBuf,
     pub env_vars: HashMap<String, ArrayValue>,
+    /// Registered completion plugins (e.g. command completion, external tool completion)
+    pub plugins: Vec<Arc<dyn CompletionPlugin>>,
 }
 
 impl CompletionState {
@@ -23,7 +23,14 @@ impl CompletionState {
         Self {
             current_dir,
             env_vars: HashMap::new(),
+            plugins: Vec::new(),
         }
+    }
+
+    /// Register a completion plugin
+    pub fn add_plugin(&mut self, plugin: Arc<dyn CompletionPlugin>) {
+        plugin.on_init();
+        self.plugins.push(plugin);
     }
 }
 
@@ -50,26 +57,35 @@ impl WinuxshCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars) = if let Ok(state) = self.state.lock() {
-            (state.current_dir.clone(), state.env_vars.clone())
+        let (current_dir, env_vars, plugins) = if let Ok(state) = self.state.lock() {
+            (state.current_dir.clone(), state.env_vars.clone(), state.plugins.clone())
         } else {
             return Vec::new();
         };
 
         let context = CompletionContext::new(current_dir.clone(), input.to_string(), cursor_pos);
 
-        // Try different completion strategies
+        // Built-in: path completion (highest priority for explicit paths)
+        // Only short-circuit when the path completer actually returned candidates.
+        // An empty result means "no path matches" — fall through to plugins.
         if context.is_path_completion() {
             if let Ok(Some(result)) = PathCompleter::complete(&context) {
-                return self.format_completions(result, input, cursor_pos);
+                if !result.completions.is_empty() {
+                    return self.format_completions(result, input, cursor_pos);
+                }
             }
-        } else if context.is_variable_completion() {
+        }
+
+        // Built-in: variable completion
+        if context.is_variable_completion() {
             if let Ok(Some(result)) = VariableCompleter::complete(&context, &env_vars) {
                 return self.format_completions(result, input, cursor_pos);
             }
-        } else {
-            // Try command completion
-            if let Ok(Some(result)) = CommandCompleter::complete(&context) {
+        }
+
+        // Plugin chain: command completion and external tool completion
+        for plugin in &plugins {
+            if let Some(result) = plugin.complete(&context) {
                 return self.format_completions(result, input, cursor_pos);
             }
         }
@@ -80,6 +96,7 @@ impl WinuxshCompleter {
     /// Format completions as suggestions
     fn format_completions(&self, result: CompletionResult, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
         let completions = result.completions;
+        let result_descriptions = result.descriptions;
 
         // Calculate span for the word being completed
         // Find the start of the current word
@@ -107,12 +124,23 @@ impl WinuxshCompleter {
             }
         };
 
+        // Pad descriptions so they align at the same column
+        let max_value_len = completions.iter().map(|c| c.len()).max().unwrap_or(0);
+
         completions
             .into_iter()
-            .map(|c| Suggestion {
-                value: c,
-                span: span.clone(),
-                ..Default::default()
+            .zip(result_descriptions.into_iter())
+            .map(|(c, desc)| {
+                let padded_desc = desc.map(|d| {
+                    let padding = max_value_len.saturating_sub(c.len());
+                    format!("{:width$}{}", "", d, width = padding)
+                });
+                Suggestion {
+                    value: c,
+                    description: padded_desc,
+                    span: span.clone(),
+                    ..Default::default()
+                }
             })
             .collect()
     }

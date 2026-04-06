@@ -56,7 +56,10 @@ pub struct CommandPriority {
 
 impl CommandClassification {
     pub fn classify(&self, command: &str) -> Option<CommandCategory> {
-        // Check builtin first (highest priority)
+        // Match routing priority so category checks stay consistent with execution.
+        if self.builtin.builtin.contains(&command.to_string()) {
+            return Some(CommandCategory::Builtin);
+        }
         if self.simple.simple.contains(&command.to_string()) {
             return Some(CommandCategory::Simple);
         }
@@ -65,9 +68,6 @@ impl CommandClassification {
         }
         if self.complex.complex.contains(&command.to_string()) {
             return Some(CommandCategory::Complex);
-        }
-        if self.builtin.builtin.contains(&command.to_string()) {
-            return Some(CommandCategory::Builtin);
         }
         None
     }

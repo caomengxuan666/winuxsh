@@ -23,7 +23,8 @@ static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 use windows_sys::Win32::Foundation::BOOL;
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, PHANDLER_ROUTINE,
+    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
+    CTRL_SHUTDOWN_EVENT, PHANDLER_ROUTINE,
 };
 
 #[cfg(windows)]
@@ -32,18 +33,20 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
         CTRL_C_EVENT => {
             // Ctrl+C received
             CTRL_C_RECEIVED.store(true, Ordering::SeqCst);
-            
+
             // If there's a child process running, try to terminate it
             if CURRENT_CHILD_PID != 0 {
                 // Terminate the child process only
-                use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+                use windows_sys::Win32::System::Threading::{
+                    OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+                };
                 let handle = OpenProcess(PROCESS_TERMINATE, 0, CURRENT_CHILD_PID);
                 if !handle.is_null() {
                     TerminateProcess(handle, 1);
                 }
                 return 1; // Signal handled
             }
-            
+
             // No child process, let the default handler run
             return 0;
         }
@@ -87,7 +90,9 @@ pub fn set_current_child_pid(_: u32) {}
 #[cfg(not(windows))]
 pub fn clear_current_child_pid() {}
 #[cfg(not(windows))]
-pub fn is_ctrl_c_received() -> bool { false }
+pub fn is_ctrl_c_received() -> bool {
+    false
+}
 
 use colored::Colorize;
 use reedline::Signal;
@@ -261,5 +266,7 @@ fn initialize_winuxcmd() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    Err(anyhow::anyhow!("Failed to initialize WinuxCmd FFI. Please ensure winuxcore.dll is available."))
+    Err(anyhow::anyhow!(
+        "Failed to initialize WinuxCmd FFI. Please ensure winuxcore.dll is available."
+    ))
 }

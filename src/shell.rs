@@ -1,8 +1,8 @@
 use colored::Colorize;
 use log::debug;
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, DefaultCompleter, DefaultPrompt, DefaultPromptSegment,
-    Emacs, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent,
+    default_emacs_keybindings, DefaultPrompt, DefaultPromptSegment, Emacs,
+    FileBackedHistory, KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline, ReedlineEvent,
     ReedlineMenu,
 };
 use std::collections::HashMap;
@@ -24,8 +24,6 @@ use crate::theme::ThemePlugin;
 use crate::tokenizer::{CommandInfo, ParsedCommand, Tokenizer};
 use glob;
 
-use crate::command_router::CommandClassification;
-
 /// Main shell structure
 pub struct Shell {
     pub current_dir: PathBuf,
@@ -42,7 +40,6 @@ pub struct Shell {
     // Store completion state reference for updates
     completion_state: std::sync::Arc<std::sync::Mutex<crate::completion::CompletionState>>,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScriptFlow {
     None,
@@ -86,90 +83,19 @@ impl Shell {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let history_path = home_dir.join(".winsh_history");
 
-        // Get commands from PATH for completion
-        fn get_path_commands() -> Vec<String> {
-            let mut commands = Vec::new();
-
-            if let Ok(path_env) = std::env::var("PATH") {
-                for path in env::split_paths(&path_env) {
-                    if let Ok(entries) = std::fs::read_dir(path) {
-                        for entry in entries.flatten() {
-                            if let Ok(file_type) = entry.file_type() {
-                                if file_type.is_file() {
-                                    let file_name = entry.file_name().to_string_lossy().to_string();
-                                    // Check if it's executable by extension
-                                    let is_executable = file_name.ends_with(".exe")
-                                        || file_name.ends_with(".bat")
-                                        || file_name.ends_with(".cmd")
-                                        || file_name.ends_with(".ps1");
-
-                                    if is_executable {
-                                        // Remove extension for cleaner completion
-                                        let name_without_ext =
-                                            if let Some(pos) = file_name.rfind('.') {
-                                                file_name[..pos].to_string()
-                                            } else {
-                                                file_name.clone()
-                                            };
-                                        commands.push(name_without_ext);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            commands
-        }
-
-        let path_commands = get_path_commands();
-
-        // Create command list for completion (built-in + PATH commands)
-        let builtin_commands = vec![
-            "ls".to_string(),
-            "cd".to_string(),
-            "pwd".to_string(),
-            "echo".to_string(),
-            "exit".to_string(),
-            "clear".to_string(),
-            "cat".to_string(),
-            "grep".to_string(),
-            "find".to_string(),
-            "cp".to_string(),
-            "mv".to_string(),
-            "rm".to_string(),
-            "mkdir".to_string(),
-            "jobs".to_string(),
-            "fg".to_string(),
-            "bg".to_string(),
-            "set".to_string(),
-            "unset".to_string(),
-            "export".to_string(),
-            "env".to_string(),
-            "help".to_string(),
-            "history".to_string(),
-            "alias".to_string(),
-            "unalias".to_string(),
-            "source".to_string(),
-            "array".to_string(),
-            "plugin".to_string(),
-            "theme".to_string(),
-            "oh-my-winuxsh".to_string(),
-        ];
-
-        let all_commands: Vec<String> = builtin_commands.into_iter().chain(path_commands).collect();
-
-        // Sort and deduplicate commands
-        let mut unique_commands: Vec<_> = all_commands.into_iter().collect();
-        unique_commands.sort();
-        unique_commands.dedup();
-
         // Create shared completion state with current directory
         let current_dir = std::env::current_dir()?;
         let completion_state = std::sync::Arc::new(std::sync::Mutex::new(
             crate::completion::CompletionState::new(current_dir.clone())
         ));
+
+        // Register built-in command completion plugin
+        {
+            use crate::completion::external::CommandCompletionPlugin;
+            if let Ok(mut state) = completion_state.lock() {
+                state.add_plugin(std::sync::Arc::new(CommandCompletionPlugin));
+            }
+        }
 
         // Create custom completer with shared state
         use crate::completion::WinuxshCompleter;
@@ -177,11 +103,32 @@ impl Shell {
             completion_state.clone()
         ));
 
-        // Create completion menu (exactly like MVP4)
+        // Create completion menu — single-column popup style
+        use nu_ansi_term::{Color, Style};
         let completion_menu = Box::new(
-            ColumnarMenu::default()
+            ListMenu::default()
                 .with_name("completion_menu")
-                .with_marker("? "),
+                // Pass the full line buffer to the completer (not just the diff)
+                .with_only_buffer_difference(false)
+                // prefix marker for the selected row
+                .with_marker("> ")
+                // normal (unselected) item
+                .with_text_style(
+                    Style::new().fg(Color::White)
+                )
+                // selected item: bright cyan bg, black fg
+                .with_selected_text_style(
+                    Style::new().fg(Color::Black).on(Color::Fixed(39))
+                )
+                // matched chars (typed prefix) shown bold green
+                .with_match_text_style(
+                    Style::new().fg(Color::Fixed(114)).bold()
+                )
+                // matched chars inside the selected item
+                .with_selected_match_text_style(
+                    Style::new().fg(Color::Black).on(Color::Fixed(39)).bold()
+                )
+                .with_page_size(12),
         );
 
         // Setup TAB key binding for completion (exactly like MVP4)
@@ -238,7 +185,11 @@ impl Shell {
                 Some(router)
             }
             Err(e) => {
-                eprintln!("{} {}", "Warning:".yellow(), format!("Failed to load command classification: {}", e));
+                eprintln!(
+                    "{} {}",
+                    "Warning:".yellow(),
+                    format!("Failed to load command classification: {}", e)
+                );
                 None
             }
         };
@@ -312,6 +263,8 @@ impl Shell {
                     router.set_enable_dll(enable_dll);
                 }
             }
+            // Always register external completion plugin (uses defaults when config failed)
+            shell.register_external_completion_plugin();
         }
 
         // Initialize plugins
@@ -360,6 +313,52 @@ impl Shell {
         Ok(())
     }
 
+    /// Load external completion definitions from the configured directory and
+    /// register an `ExternalCompletionPlugin` into the completion state.
+    fn register_external_completion_plugin(&self) {
+        use crate::completion::external::ExternalCompletionPlugin;
+
+        // Collect directories: configured ones + default ~/.winsh/completions
+        let mut dirs: Vec<PathBuf> = self.config.completions.completion_dirs.iter().map(|dir| {
+            if dir.starts_with('~') {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(&dir[2..]) // skip "~/"
+                } else {
+                    PathBuf::from(dir)
+                }
+            } else {
+                PathBuf::from(dir)
+            }
+        }).collect();
+
+        // Always include the default dir
+        if let Some(home) = dirs::home_dir() {
+            let default_dir = home.join(".winsh").join("completions");
+            if !dirs.contains(&default_dir) {
+                dirs.push(default_dir);
+            }
+        }
+
+        let mut plugin = ExternalCompletionPlugin::new();
+
+        for dir in &dirs {
+            if !dir.exists() {
+                log::debug!("External completion dir {:?} does not exist, skipping", dir);
+                continue;
+            }
+            plugin.load_dir(dir);
+        }
+
+        // Enrich flag descriptions from `cmd -h` output
+        plugin.enrich_descriptions_from_help();
+
+        if plugin.definition_count() > 0 {
+            if let Ok(mut state) = self.completion_state.lock() {
+                state.add_plugin(std::sync::Arc::new(plugin));
+            }
+        }
+    }
+
     /// Parse configuration file
     pub fn parse_config_file(&mut self, path: &Path) -> Result<()> {
         let file = std::fs::File::open(path)?;
@@ -383,10 +382,6 @@ impl Shell {
 
     /// Update completion state
     pub fn update_completion_state(&self) {
-        use crate::completion::WinuxshCompleter;
-        
-        // Get completer reference from line_editor
-        // Note: This is a simplified approach, in practice you might need a more sophisticated way to access the completer
         if let Ok(mut state) = self.completion_state.lock() {
             state.current_dir = self.current_dir.clone();
             state.env_vars = self.env_vars.clone();
@@ -1055,14 +1050,17 @@ impl Shell {
 
         for arg in args {
             if arg.contains('*') || arg.contains('?') || arg.contains('[') {
-                // Expand wildcard
+                // Expand wildcard per argument so fallback decisions do not depend on prior args.
                 if let Ok(matches) = glob::glob(arg) {
+                    let mut matched_paths = Vec::new();
                     for entry in matches.flatten() {
-                        expanded.push(entry.to_string_lossy().to_string());
+                        matched_paths.push(entry.to_string_lossy().to_string());
                     }
-                    // If no matches found, keep the original pattern
-                    if expanded.is_empty() || expanded.last() != Some(arg) {
+
+                    if matched_paths.is_empty() {
                         expanded.push(arg.clone());
+                    } else {
+                        expanded.extend(matched_paths);
                     }
                 } else {
                     // Invalid pattern, keep original
@@ -1108,7 +1106,7 @@ impl Shell {
                     }
 
                     // Execute the command and capture output
-                    let output = self.execute_and_capture(&command);
+                    let output = self.execute_substitution_command(&command);
                     result.push_str(&output.trim());
                 } else {
                     result.push(c);
@@ -1121,14 +1119,105 @@ impl Shell {
         result
     }
 
-    /// Execute command and capture output
-    fn execute_and_capture(&mut self, command: &str) -> String {
-        use std::process::Command;
+    fn execute_substitution_command(&mut self, command: &str) -> String {
+        let tokens = match Tokenizer::tokenize(command) {
+            Ok(tokens) => tokens,
+            Err(_) => return String::new(),
+        };
 
-        match Command::new("cmd").args(["/C", command]).output() {
-            Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
-            Err(_) => String::new(),
+        let parsed = match Parser::parse(&tokens) {
+            Ok(parsed) => parsed,
+            Err(_) => return String::new(),
+        };
+
+        let (stdout_path, stderr_path) = self.create_substitution_capture_paths();
+        let redirected = self.redirect_parsed_for_capture(&parsed, &stdout_path, &stderr_path);
+        let _ = self.execute_parsed(&redirected);
+
+        let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&stdout_path);
+        let _ = std::fs::remove_file(&stderr_path);
+        stdout
+    }
+
+    fn create_substitution_capture_paths(&self) -> (PathBuf, PathBuf) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let base = std::env::temp_dir().join(format!(
+            "winuxsh_subst_{}_{}",
+            std::process::id(),
+            nonce
+        ));
+
+        let stdout_path = base.with_extension("stdout.tmp");
+        let stderr_path = base.with_extension("stderr.tmp");
+        (stdout_path, stderr_path)
+    }
+
+    fn redirect_parsed_for_capture(
+        &self,
+        parsed: &ParsedCommand,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> ParsedCommand {
+        match parsed {
+            ParsedCommand::Single(cmd) => ParsedCommand::Single(
+                self.redirect_command_info_for_capture(cmd, stdout_path, stderr_path, true),
+            ),
+            ParsedCommand::Pipeline(cmds) => {
+                let mut redirected = cmds.clone();
+                if let Some((last, prefix)) = redirected.split_last_mut() {
+                    for cmd in prefix.iter_mut() {
+                        if cmd.stderr_redir.is_none() {
+                            cmd.stderr_redir = Some(stderr_path.to_string_lossy().to_string());
+                            cmd.stderr_append = true;
+                        }
+                    }
+                    *last = self.redirect_command_info_for_capture(last, stdout_path, stderr_path, true);
+                }
+                ParsedCommand::Pipeline(redirected)
+            }
+            ParsedCommand::And(left, right) => ParsedCommand::And(
+                Box::new(self.redirect_parsed_for_capture(left, stdout_path, stderr_path)),
+                Box::new(self.redirect_parsed_for_capture(right, stdout_path, stderr_path)),
+            ),
+            ParsedCommand::Or(left, right) => ParsedCommand::Or(
+                Box::new(self.redirect_parsed_for_capture(left, stdout_path, stderr_path)),
+                Box::new(self.redirect_parsed_for_capture(right, stdout_path, stderr_path)),
+            ),
+            ParsedCommand::Sequence(commands) => ParsedCommand::Sequence(
+                commands
+                    .iter()
+                    .map(|command| self.redirect_parsed_for_capture(command, stdout_path, stderr_path))
+                    .collect(),
+            ),
         }
+    }
+
+    fn redirect_command_info_for_capture(
+        &self,
+        cmd: &CommandInfo,
+        stdout_path: &Path,
+        stderr_path: &Path,
+        capture_stdout: bool,
+    ) -> CommandInfo {
+        let mut redirected = cmd.clone();
+
+        if capture_stdout && redirected.stdout_redir.is_none() {
+            redirected.stdout_redir = Some(stdout_path.to_string_lossy().to_string());
+            redirected.stdout_append = true;
+        }
+
+        if redirected.stderr_redir.is_none() {
+            redirected.stderr_redir = Some(stderr_path.to_string_lossy().to_string());
+            redirected.stderr_append = true;
+        }
+
+        redirected
     }
 
     fn try_builtin_with_redirection(
@@ -1725,6 +1814,21 @@ echo redirected > __OUT_PATH__
     }
 
     #[test]
+    fn test_expand_wildcards_keeps_unmatched_pattern_per_argument() {
+        let shell = Shell::new(false).unwrap();
+        let unmatched = format!(
+            "winuxsh_unmatched_{}_*.unlikely",
+            std::process::id()
+        );
+        let args = vec!["Cargo.*".to_string(), unmatched.clone()];
+
+        let expanded = shell.expand_wildcards(&args);
+
+        assert!(expanded.iter().any(|arg| arg.ends_with("Cargo.toml")));
+        assert!(expanded.contains(&unmatched));
+    }
+
+    #[test]
     fn test_builtin_stderr_redirection_file_materialized() {
         let mut shell = Shell::new(false).unwrap();
         let test_dir = std::env::temp_dir().join(format!("winuxsh_stderr_{}", std::process::id()));
@@ -1735,6 +1839,55 @@ echo redirected > __OUT_PATH__
         let err = fs::read_to_string(err_path).unwrap();
         assert_eq!(err, "");
         let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn test_command_substitution_builtin_pwd_uses_shell_path() {
+        let mut shell = Shell::new(false).unwrap();
+        let output = shell.execute_substitution_command("pwd");
+        assert_eq!(output.trim(), shell.current_dir.display().to_string());
+    }
+
+    #[test]
+    fn test_command_substitution_or_uses_shell_execution() {
+        let mut shell = Shell::new(false).unwrap();
+        let output = shell.execute_substitution_command("notexistcmd || echo fallback");
+        assert_eq!(output.trim(), "fallback");
+    }
+
+    #[test]
+    fn test_command_substitution_sequence_uses_shell_execution() {
+        let mut shell = Shell::new(false).unwrap();
+        let output = shell.execute_substitution_command("echo one; echo two");
+        assert_eq!(output.trim(), "one\ntwo");
+    }
+
+    #[test]
+    fn test_command_substitution_preserves_side_effects() {
+        let mut shell = Shell::new(false).unwrap();
+        let _ = shell.execute_substitution_command("set SUBST_VAR=1");
+        assert_eq!(
+            shell.env_vars.get("SUBST_VAR"),
+            Some(&ArrayValue::String("1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_command_substitution_failure_returns_empty_string() {
+        let mut shell = Shell::new(false).unwrap();
+        let output = shell.execute_substitution_command("notexistcmd");
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_command_substitution_pipeline_captures_last_stdout() {
+        let mut shell = Shell::new(false).unwrap();
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let cmd_exe = format!("{system_root}\\System32\\cmd.exe");
+        let findstr_exe = format!("{system_root}\\System32\\findstr.exe");
+        let command = format!("{cmd_exe} /C echo hello | {findstr_exe} h");
+        let output = shell.execute_substitution_command(&command);
+        assert_eq!(output.trim(), "hello");
     }
 
     #[test]

@@ -153,10 +153,10 @@ mod tests {
 
     #[test]
     fn test_get_environment_variables() {
+        // Inject a deterministic variable so this test does not depend on host env shape.
+        std::env::set_var("WINUXSH_TEST_ENV", "1");
         let vars = VariableCompleter::get_environment_variables();
-        assert!(!vars.is_empty());
-        // Most systems have PATH
-        assert!(vars.contains(&"PATH".to_string()));
+        assert!(vars.iter().any(|k| k == "WINUXSH_TEST_ENV"));
     }
 
     #[test]
