@@ -87,11 +87,12 @@ winsh-plugin.workspace = true
 reedline.workspace = true
 anyhow.workspace = true
 log.workspace = true
-env_logger.workspace = true
 colored.workspace = true
 dirs.workspace = true
 nu-ansi-term.workspace = true
 terminal_size = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile.workspace = true

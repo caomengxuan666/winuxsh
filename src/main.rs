@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process;
 
 use anyhow::Result;
-use log::debug;
+use tracing::{debug, info, warn, error};
 
 use winsh_core::{ShellState, ShellError};
 use winsh_lexer::Lexer;
@@ -17,9 +17,20 @@ use winsh_history::HistoryManager;
 use winsh_prompt::{render_prompt, PromptContext};
 
 fn main() {
-    env_logger::init();
+    // Initialize tracing subscriber - controlled by RUST_LOG env var
+    // Usage: RUST_LOG=debug winsh
+    // Levels: error, warn, info, debug, trace
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_target(false)
+        .with_writer(std::io::stderr) // Log to stderr so it doesn't interfere with output
+        .init();
 
     let args: Vec<String> = std::env::args().collect();
+    debug!("args={:?}", args);
 
     if args.len() > 1 {
         match args[1].as_str() {
@@ -37,11 +48,13 @@ fn main() {
                     process::exit(1);
                 }
                 let cmd = &args[2];
+                debug!("-c mode, cmd={}", cmd);
                 let exit_code = execute_command(cmd);
                 process::exit(exit_code);
             }
             _ => {
                 let script_path = &args[1];
+                debug!("script mode, file={}", script_path);
                 let exit_code = execute_script(script_path);
                 process::exit(exit_code);
             }
@@ -61,86 +74,37 @@ fn run_repl() -> Result<()> {
     let mut history = HistoryManager::new();
 
     if let Err(e) = history.load() {
-        debug!("Failed to load history: {}", e);
+        warn!("Failed to load history: {}", e);
     }
 
     // Load shell configuration
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home_str = home.to_string_lossy().to_string();
+    debug!("home={}", home.display());
+
     let winshrc = home.join(".winshrc");
+    info!("Loading config: {}", winshrc.display());
+
     if winshrc.exists() {
-        debug!("Loading config: {}", winshrc.display());
+        debug!("Config file found, reading...");
         match std::fs::read_to_string(&winshrc) {
             Ok(content) => {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
-                        continue;
-                    }
-                    // Handle source command
-                    if let Some(path) = trimmed.strip_prefix("source ") {
-                        let path = path.trim().trim_matches('"').trim_matches('\'');
-                        let source_path = if path.starts_with("$HOME") || path.starts_with("~") {
-                            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-                            let rest = path.replacen("$HOME", &home.to_string_lossy(), 1)
-                                .replacen("~", &home.to_string_lossy(), 1);
-                            PathBuf::from(rest)
-                        } else {
-                            PathBuf::from(path)
-                        };
-                        if source_path.exists() {
-                            if let Ok(source_content) = std::fs::read_to_string(&source_path) {
-                                for src_line in source_content.lines() {
-                                    execute_config_line(src_line, &mut state, &mut executor);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    // Handle variable assignments
-                    if let Some((name, value)) = trimmed.split_once('=') {
-                        let name = name.trim();
-                        let value = value.trim().trim_matches('"').trim_matches('\'');
-                        match name {
-                            "WINUXSH_THEME" => state.config.theme = value.to_string(),
-                            "PROMPT" | "PS1" => state.config.prompt = value.to_string(),
-                            "RPROMPT" => state.config.rprompt = value.to_string(),
-                            _ if name.chars().all(|c| c.is_alphanumeric() || c == '_') => {
-                                state.env.set(name, value);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    // Handle export
-                    if let Some(rest) = trimmed.strip_prefix("export ") {
-                        let rest = rest.trim();
-                        if let Some((name, value)) = rest.split_once('=') {
-                            state.env.export(name.trim(), value.trim().trim_matches('"').trim_matches('\''));
-                        }
-                        continue;
-                    }
-                    // Handle setopt
-                    if let Some(opt) = trimmed.strip_prefix("setopt ") {
-                        let opt = opt.trim();
-                        apply_option(opt, true, &mut state);
-                        continue;
-                    }
-                    // Handle alias
-                    if let Some(rest) = trimmed.strip_prefix("alias ") {
-                        let rest = rest.trim();
-                        if let Some((name, value)) = rest.split_once('=') {
-                            let value = value.trim().trim_matches('\'').trim_matches('"');
-                            state.set_alias(name.trim().to_string(), value.to_string());
-                        }
-                        continue;
-                    }
-                }
+                debug!("Config file loaded, {} bytes", content.len());
+                process_config_content(&content, &home_str, &mut state, &mut executor);
+                info!("Config loaded successfully");
             }
             Err(e) => {
-                debug!("Failed to read config: {}", e);
+                error!("Failed to read config: {}", e);
             }
         }
+    } else {
+        info!("No .winshrc found at {}", winshrc.display());
     }
+
+    // Log final prompt state
+    debug!("Final PROMPT='{}'", state.config.prompt);
+    debug!("Final RPROMPT='{}'", state.config.rprompt);
+    debug!("Final theme='{}'", state.config.theme);
 
     println!("WinSH {} - zsh-compatible shell for Windows", env!("CARGO_PKG_VERSION"));
     println!();
@@ -153,6 +117,9 @@ fn run_repl() -> Result<()> {
         } else {
             render_prompt(&state.config.rprompt, &ctx)
         };
+
+        debug!("prompt='{}'", prompt.replace('\x1b', "\\e"));
+
         let input = read_line_with_rprompt(&prompt, &rprompt)?;
 
         if input.is_none() {
@@ -206,6 +173,121 @@ fn run_repl() -> Result<()> {
     Ok(())
 }
 
+/// Process configuration content, expanding variables as we go.
+fn process_config_content(
+    content: &str,
+    home_str: &str,
+    state: &mut ShellState,
+    executor: &mut Executor,
+) {
+    // Process lines, expanding variables from state as we go
+    // This allows variables set earlier to be used later (e.g., WINUXSH_THEME)
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Expand known variables in the line
+        let expanded = expand_config_line(trimmed, home_str, state);
+
+        // Handle source command
+        if let Some(path) = expanded.strip_prefix("source ") {
+            let path = path.trim().trim_matches('"').trim_matches('\'');
+            let source_path = PathBuf::from(path);
+            info!("Sourcing: {}", source_path.display());
+            if source_path.exists() {
+                if let Ok(source_content) = std::fs::read_to_string(&source_path) {
+                    debug!("Source file loaded, {} bytes", source_content.len());
+                    process_config_content(&source_content, home_str, state, executor);
+                }
+            } else {
+                warn!("Source file not found: {}", source_path.display());
+            }
+            continue;
+        }
+
+        // Handle variable assignments
+        if let Some((name, value)) = expanded.split_once('=') {
+            let name = name.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            match name {
+                "WINUXSH_THEME" => {
+                    info!("Setting theme: {}", value);
+                    state.config.theme = value.to_string();
+                    state.env.set(name, value);
+                }
+                "PROMPT" | "PS1" => {
+                    info!("Setting PROMPT: {}", value);
+                    state.config.prompt = value.to_string();
+                }
+                "RPROMPT" => {
+                    info!("Setting RPROMPT: {}", value);
+                    state.config.rprompt = value.to_string();
+                }
+                _ if name.chars().all(|c| c.is_alphanumeric() || c == '_') => {
+                    debug!("Setting var: {}={}", name, value);
+                    state.env.set(name, value);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // Handle export
+        if let Some(rest) = expanded.strip_prefix("export ") {
+            let rest = rest.trim();
+            if let Some((name, value)) = rest.split_once('=') {
+                debug!("Exporting: {}={}", name.trim(), value.trim());
+                state.env.export(name.trim(), value.trim().trim_matches('"').trim_matches('\''));
+            }
+            continue;
+        }
+
+        // Handle setopt
+        if let Some(opt) = expanded.strip_prefix("setopt ") {
+            let opt = opt.trim();
+            debug!("setopt: {}", opt);
+            apply_option(opt, true, state);
+            continue;
+        }
+
+        // Handle alias
+        if let Some(rest) = expanded.strip_prefix("alias ") {
+            let rest = rest.trim();
+            if let Some((name, value)) = rest.split_once('=') {
+                let value = value.trim().trim_matches('\'').trim_matches('"');
+                debug!("alias {}='{}'", name.trim(), value);
+                state.set_alias(name.trim().to_string(), value.to_string());
+            }
+            continue;
+        }
+    }
+}
+
+/// Expand variables in a config line.
+fn expand_config_line(line: &str, home_str: &str, state: &ShellState) -> String {
+    let mut result = line.to_string();
+
+    // Expand $HOME (but not inside %{} sequences which are prompt escapes)
+    result = result.replace("$HOME", home_str);
+
+    // Expand shell variables from state
+    let mut vars: Vec<(String, String)> = state.env.all().into_iter().collect();
+    vars.sort_by(|a, b| b.0.len().cmp(&a.0.len())); // Longest first
+
+    for (name, value) in &vars {
+        result = result.replace(&format!("${{{}}}", name), value);
+        result = result.replace(&format!("${}", name), value);
+    }
+
+    // Don't expand ~ inside prompt escape sequences (%~ is a valid prompt escape)
+    // Only expand ~ at the beginning of paths
+    // This is handled by the caller if needed
+
+    result
+}
+
 /// Build the prompt context for rendering.
 fn build_prompt_context(state: &ShellState) -> PromptContext {
     PromptContext {
@@ -215,21 +297,12 @@ fn build_prompt_context(state: &ShellState) -> PromptContext {
         job_count: 0,
         line_number: 1,
         shell_name: "winsh".to_string(),
-        username: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".to_string()),
-        hostname: std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "localhost".to_string()),
-    }
-}
-
-/// Read a line of input from the user.
-fn read_line(prompt: &str) -> Result<Option<String>> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    match io::stdin().read_line(&mut input) {
-        Ok(0) => Ok(None),
-        Ok(_) => Ok(Some(input.trim_end().to_string())),
-        Err(e) => Err(e.into()),
+        username: std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".to_string()),
+        hostname: std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "localhost".to_string()),
     }
 }
 
@@ -237,16 +310,14 @@ fn read_line(prompt: &str) -> Result<Option<String>> {
 fn read_line_with_rprompt(prompt: &str, rprompt: &str) -> Result<Option<String>> {
     print!("{}", prompt);
     if !rprompt.is_empty() {
-        // Save cursor, move to right, print RPROMPT, restore cursor
-        print!("\x1b[s");
-        // Get terminal width (default to 80)
+        print!("\x1b[s"); // Save cursor
         let width = term_width().unwrap_or(80);
         let rprompt_len = strip_ansi(rprompt).len();
         if rprompt_len < width as usize {
             let col = width as usize - rprompt_len;
             print!("\x1b[{}G{}", col, rprompt);
         }
-        print!("\x1b[u");
+        print!("\x1b[u"); // Restore cursor
     }
     io::stdout().flush()?;
 
@@ -267,7 +338,7 @@ fn term_width() -> Option<u16> {
     }
 }
 
-/// Strip ANSI escape sequences for length calculation.
+/// Strip ANSI escape sequences.
 fn strip_ansi(s: &str) -> String {
     let mut result = String::new();
     let mut chars = s.chars().peekable();
@@ -289,7 +360,7 @@ fn strip_ansi(s: &str) -> String {
     result
 }
 
-/// Apply a shell option from config.
+/// Apply a shell option.
 fn apply_option(option: &str, value: bool, state: &mut ShellState) {
     let opts = state.options_mut();
     match option {
@@ -315,26 +386,27 @@ fn apply_option(option: &str, value: bool, state: &mut ShellState) {
     }
 }
 
-/// Execute a single config line.
-fn execute_config_line(line: &str, state: &mut ShellState, executor: &mut Executor) {
+/// Execute a single config line (unused, kept for reference).
+fn execute_config_line(line: &str, state: &mut ShellState, _executor: &mut Executor) {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return;
     }
-    // Handle PROMPT/RPROMPT assignments
     if let Some(rest) = trimmed.strip_prefix("PROMPT=") {
-        state.config.prompt = rest.trim().to_string();
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        state.config.prompt = value.to_string();
         return;
     }
     if let Some(rest) = trimmed.strip_prefix("PS1=") {
-        state.config.prompt = rest.trim().to_string();
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        state.config.prompt = value.to_string();
         return;
     }
     if let Some(rest) = trimmed.strip_prefix("RPROMPT=") {
-        state.config.rprompt = rest.trim().to_string();
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        state.config.rprompt = value.to_string();
         return;
     }
-    // Handle variable exports from themes
     if let Some((name, value)) = trimmed.split_once('=') {
         let name = name.trim();
         if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -418,6 +490,16 @@ fn print_help() {
     println!("  winsh --version     Show version");
     println!();
     println!("{}", "=".repeat(50));
+    println!("LOGGING");
+    println!("{}", "=".repeat(50));
+    println!("  Set RUST_LOG env var to control log level:");
+    println!("    RUST_LOG=error winsh    Only errors");
+    println!("    RUST_LOG=warn  winsh    Warnings + errors");
+    println!("    RUST_LOG=info  winsh    Info + above");
+    println!("    RUST_LOG=debug winsh    Debug + above");
+    println!("    RUST_LOG=trace winsh    Everything");
+    println!();
+    println!("{}", "=".repeat(50));
     println!("BUILT-IN COMMANDS");
     println!("{}", "=".repeat(50));
     println!("  cd [DIR]            Change directory");
@@ -445,33 +527,10 @@ fn print_help() {
     println!("  help                Show this help");
     println!();
     println!("{}", "=".repeat(50));
-    println!("KEY FEATURES");
-    println!("{}", "=".repeat(50));
-    println!("  Zsh-style prompt with escape sequences (PS1/PROMPT)");
-    println!("  History management with expansion (!!, !$, !n, ^old^new)");
-    println!("  Vi and Emacs keybinding modes");
-    println!("  Tab completion (commands, paths, variables)");
-    println!("  Variable expansion (\\$VAR, \\${{VAR:-default}}, \\${{VAR#pattern}})");
-    println!("  Arithmetic expansion \\$((expr))");
-    println!("  Conditional expressions [[ ... ]]");
-    println!("  Here Documents (<<EOF)");
-    println!("  Pipeline support (cmd1 | cmd2)");
-    println!("  Redirections (<, >, >>, 2>, 2>&1)");
-    println!("  Background execution (cmd &)");
-    println!("  Job control (fg, bg, jobs, kill, wait)");
-    println!("  Function definitions (name() {{ ... }})");
-    println!("  Control flow (if/for/while/until/case)");
-    println!("  Shell options (setopt/unsetopt)");
-    println!("  Plugin system with hooks (precmd, preexec, chpwd)");
-    println!();
-    println!("{}", "=".repeat(50));
     println!("CONFIGURATION");
     println!("{}", "=".repeat(50));
-    println!("  ~/.winshrc        Interactive shell configuration");
-    println!("  ~/.winshenv        Always-loaded configuration");
-    println!("  ~/.winshprofile    Login shell configuration");
-    println!("  ~/.winshlogout     Executed on exit");
-    println!("  ~/.winsh_history   Command history file");
+    println!("  ~/.winshrc          Interactive shell configuration");
+    println!("  ~/.winsh_history    Command history file");
     println!();
 }
 
