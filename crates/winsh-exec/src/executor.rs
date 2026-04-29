@@ -475,6 +475,45 @@ impl Executor {
             }
             "true" => Ok(Some(0)),
             "false" => Ok(Some(1)),
+            "type" => {
+                if args.is_empty() {
+                    eprintln!("type: missing argument");
+                    return Ok(Some(1));
+                }
+                let cmd = args[0];
+                if self.is_builtin(cmd) {
+                    println!("{} is a shell builtin", cmd);
+                } else if state.has_function(cmd) {
+                    println!("{} is a function", cmd);
+                } else if state.has_alias(cmd) {
+                    println!("{} is aliased to '{}'", cmd, state.get_alias(cmd).unwrap_or(""));
+                } else {
+                    match self.find_command(cmd, state) {
+                        Ok(path) => println!("{} is {}", cmd, path.display()),
+                        Err(_) => println!("{}: not found", cmd),
+                    }
+                }
+                Ok(Some(0))
+            }
+            "which" => {
+                if args.is_empty() {
+                    return Ok(Some(1));
+                }
+                for cmd in args {
+                    if self.is_builtin(cmd) {
+                        println!("{}: shell built-in command", cmd);
+                    } else {
+                        match self.find_command(cmd, state) {
+                            Ok(path) => println!("{}", path.display()),
+                            Err(_) => {
+                                eprintln!("which: no {} in PATH", cmd);
+                                return Ok(Some(1));
+                            }
+                        }
+                    }
+                }
+                Ok(Some(0))
+            }
             "help" => {
                 println!("WinSH built-in commands:");
                 println!("  cd       echo    exit     pwd     type    which");
