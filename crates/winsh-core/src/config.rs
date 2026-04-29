@@ -3,6 +3,23 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// The command execution backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendType {
+    /// Use system commands (default PATH lookup)
+    System,
+    /// Use winuxcmd/uutils coreutils implementation
+    WinuxCmd,
+    /// Auto-detect: prefer winuxcmd if available, fallback to system
+    Auto,
+}
+
+impl Default for BackendType {
+    fn default() -> Self {
+        BackendType::Auto
+    }
+}
+
 /// Shell configuration.
 ///
 /// This contains all the configuration settings for the shell,
@@ -31,6 +48,12 @@ pub struct ShellConfig {
     pub aliases: HashMap<String, String>,
     /// Custom environment variables
     pub env_vars: HashMap<String, String>,
+    /// Command execution backend
+    pub backend: BackendType,
+    /// Path to winuxcmd binary (when using WinuxCmd backend)
+    pub winuxcmd_path: Option<PathBuf>,
+    /// Oh-My-Winuxsh directory
+    pub oh_my_winsh_dir: Option<PathBuf>,
 }
 
 impl Default for ShellConfig {
@@ -55,6 +78,9 @@ impl Default for ShellConfig {
             theme: "default".to_string(),
             aliases: HashMap::new(),
             env_vars: HashMap::new(),
+            backend: BackendType::Auto,
+            winuxcmd_path: None,
+            oh_my_winsh_dir: Some(home.join(".oh-my-winuxsh")),
         }
     }
 }

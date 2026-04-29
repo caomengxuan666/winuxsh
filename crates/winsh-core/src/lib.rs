@@ -16,7 +16,7 @@ pub mod glob;
 pub use error::ShellError;
 pub use state::ShellState;
 pub use value::Value;
-pub use config::ShellConfig;
+pub use config::{ShellConfig, BackendType};
 pub use env::Env;
 pub use expansion::expand_variable;
 pub use arithmetic::eval_arithmetic;
