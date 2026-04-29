@@ -1,0 +1,13 @@
+[package]
+name = "winsh-prompt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WinSH prompt system with escape sequences and themes"
+
+[dependencies]
+winsh-core.workspace = true
+thiserror.workspace = true
+log.workspace = true
+nu-ansi-term.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "winsh-complete"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WinSH completion system"
+
+[dependencies]
+winsh-ast.workspace = true
+winsh-core.workspace = true
+winsh-lexer.workspace = true
+thiserror.workspace = true
+log.workspace = true
+glob.workspace = true

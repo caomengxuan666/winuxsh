@@ -1,0 +1,13 @@
+[package]
+name = "winsh-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WinSH FFI bindings for winuxcmd (optional)"
+
+[dependencies]
+winsh-core.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true

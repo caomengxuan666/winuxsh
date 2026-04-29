@@ -1,0 +1,15 @@
+[package]
+name = "winsh-builtins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WinSH built-in commands"
+
+[dependencies]
+winsh-ast.workspace = true
+winsh-core.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+which = "4.0"

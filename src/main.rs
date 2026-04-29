@@ -1,265 +1,255 @@
-// WinSH MVP6 - Array Support and Internationalization
-//
-// MVP6 Features:
-// - Array support (definition, access, expansion)
-// - Internationalization (English only)
-// - Enhanced config file support (terminal styling)
-// - Plugin system support
-// - Modular architecture following Rust best practices
+//! # WinSH - Windows Shell
+//!
+//! A zsh-compatible shell for Windows, written in Rust.
+
+use std::io::{self, Write};
+use std::process;
 
 use anyhow::Result;
+use log::debug;
 
-// Win32 API for Ctrl+C handling
-#[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(windows)]
-static mut CURRENT_CHILD_PID: u32 = 0;
-
-#[cfg(windows)]
-static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::BOOL;
-#[cfg(windows)]
-use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, PHANDLER_ROUTINE,
-};
-
-#[cfg(windows)]
-unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
-    match ctrl_type {
-        CTRL_C_EVENT => {
-            // Ctrl+C received
-            CTRL_C_RECEIVED.store(true, Ordering::SeqCst);
-            
-            // If there's a child process running, try to terminate it
-            if CURRENT_CHILD_PID != 0 {
-                // Terminate the child process only
-                use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-                let handle = OpenProcess(PROCESS_TERMINATE, 0, CURRENT_CHILD_PID);
-                if !handle.is_null() {
-                    TerminateProcess(handle, 1);
-                }
-                return 1; // Signal handled
-            }
-            
-            // No child process, let the default handler run
-            return 0;
-        }
-        _ => 0, // Let default handlers run for other signals
-    }
-}
-#[cfg(windows)]
-pub fn setup_ctrl_c_handler() {
-    unsafe {
-        if SetConsoleCtrlHandler(Some(ctrl_handler), 1) == 0 {
-            eprintln!("Warning: Failed to set Ctrl+C handler");
-        } else {
-            log::debug!("Ctrl+C handler installed successfully");
-        }
-    }
-}
-
-#[cfg(windows)]
-pub fn set_current_child_pid(pid: u32) {
-    unsafe {
-        CURRENT_CHILD_PID = pid;
-    }
-}
-
-#[cfg(windows)]
-pub fn clear_current_child_pid() {
-    unsafe {
-        CURRENT_CHILD_PID = 0;
-    }
-}
-
-#[cfg(windows)]
-pub fn is_ctrl_c_received() -> bool {
-    CTRL_C_RECEIVED.swap(false, Ordering::SeqCst)
-}
-
-#[cfg(not(windows))]
-pub fn setup_ctrl_c_handler() {}
-#[cfg(not(windows))]
-pub fn set_current_child_pid(_: u32) {}
-#[cfg(not(windows))]
-pub fn clear_current_child_pid() {}
-#[cfg(not(windows))]
-pub fn is_ctrl_c_received() -> bool { false }
-
-use colored::Colorize;
-use reedline::Signal;
-use std::env;
-use std::path::PathBuf;
-
-mod array;
-mod builtins;
-mod command_router;
-mod completion;
-mod config;
-mod error;
-mod executor;
-mod job;
-mod oh_my_winuxsh;
-mod parser;
-mod plugin;
-mod shell;
-mod theme;
-mod tokenizer;
-mod winuxcmd_ffi;
-
-use shell::Shell;
-use winuxcmd_ffi::WinuxCmdFFI;
-
-fn print_usage() {
-    println!("WinSH usage:");
-    println!("  winuxsh -c \"command\"");
-    println!("  winuxsh script.sh [args...]");
-    println!("  winuxsh --help | -h");
-    println!("  winuxsh --version");
-}
+use winsh_core::{ShellState, ShellError};
+use winsh_lexer::Lexer;
+use winsh_parser::Parser;
+use winsh_exec::Executor;
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("{} {}", "Error:".red(), e);
-        std::process::exit(1);
+    // Initialize logging
+    env_logger::init();
+
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+
+    // Handle --help and --version
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--version" | "-V" => {
+                println!("WinSH {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "-c" => {
+                // Execute command from argument
+                if args.len() < 3 {
+                    eprintln!("winsh: -c requires an argument");
+                    process::exit(1);
+                }
+                let cmd = &args[2];
+                let exit_code = execute_command(cmd);
+                process::exit(exit_code);
+            }
+            _ => {
+                // Assume it's a script file
+                let script_path = &args[1];
+                let exit_code = execute_script(script_path);
+                process::exit(exit_code);
+            }
+        }
+    }
+
+    // Interactive mode - start REPL
+    if let Err(e) = run_repl() {
+        eprintln!("winsh: {}", e);
+        process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    // Initialize logging (default to error level only)
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Error)
-        .parse_env("RUST_LOG")
-        .init();
+/// Run the interactive REPL.
+fn run_repl() -> Result<()> {
+    let mut state = ShellState::new();
+    let mut executor = Executor::new();
 
-    // Setup Ctrl+C handler
-    setup_ctrl_c_handler();
+    // Print welcome message
+    println!("WinSH {}", env!("CARGO_PKG_VERSION"));
+    println!("Type 'help' for help, 'exit' to exit.");
+    println!();
 
-    // Initialize WinuxCmd FFI
-    if let Err(e) = initialize_winuxcmd() {
-        eprintln!("Warning: Failed to initialize WinuxCmd: {}", e);
-    }
+    loop {
+        // Get the prompt
+        let prompt = get_prompt(&state);
 
-    // Parse command line arguments
+        // Read input
+        let input = read_line(&prompt)?;
 
-    let args: Vec<String> = env::args().collect();
+        // Check for EOF
+        if input.is_none() {
+            println!();
+            break;
+        }
 
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "-c" => {
-                if args.len() > 2 {
-                    let mut shell = Shell::new(true)?;
-                    if let Err(e) = shell.save_history(&args[2]) {
-                        eprintln!(
-                            "{} {}",
-                            "Warning:".yellow(),
-                            format!("Failed to save history: {}", e)
-                        );
-                    }
-                    shell.execute_command(&args[2])?;
-                } else {
-                    eprintln!("{} {}", "Error:".red(), "-c requires an argument");
-                    std::process::exit(1);
-                }
+        let input = input.unwrap();
+
+        // Skip empty input
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Skip comments
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Add to history
+        // TODO: Implement history
+
+        // Check for exit
+        if trimmed == "exit" {
+            break;
+        }
+
+        // Execute the command
+        match execute_line(trimmed, &mut state, &mut executor) {
+            Ok(code) => {
+                debug!("Command exited with code: {}", code);
             }
-            "--help" | "-h" => {
-                print_usage();
+            Err(ShellError::Exit(code)) => {
+                process::exit(code);
             }
-            "--version" => {
-                println!(
-                    "{}",
-                    "WinSH MVP6 - Array Support and Internationalization version 0.6.0".green()
-                );
-            }
-            _ => {
-                // Check if it's a script file
-                let script_path = PathBuf::from(&args[1]);
-                if script_path.exists() {
-                    let mut shell = Shell::new(true)?;
-                    shell.run_script_file(&script_path, &args[2..])?;
-                } else {
-                    eprintln!("{} {}", "Unknown argument:".red(), args[1]);
-                    print_usage();
-                    std::process::exit(1);
-                }
+            Err(e) => {
+                eprintln!("winsh: {}", e);
             }
         }
-        return Ok(());
     }
-
-    let mut shell = Shell::new(true)?;
-    shell.run_repl()?;
 
     Ok(())
 }
 
-// Add this to shell module temporarily
-impl Shell {
-    pub fn run_repl(&mut self) -> Result<()> {
-        println!(
-            "{}",
-            "WinSH MVP6 - Array Support and Internationalization".green()
-        );
-        println!("Type 'help' for available commands");
-        println!();
+/// Get the shell prompt.
+fn get_prompt(state: &ShellState) -> String {
+    let dir = state.current_dir();
+    let dir_str = dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| dir.display().to_string());
 
-        loop {
-            let prompt = self.get_prompt();
+    format!("{} $ ", dir_str)
+}
 
-            match self.line_editor.read_line(&prompt) {
-                Ok(Signal::Success(buffer)) => {
-                    let line = buffer.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
+/// Read a line of input from the user.
+fn read_line(prompt: &str) -> Result<Option<String>> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
 
-                    if let Err(e) = self.save_history(line) {
-                        eprintln!(
-                            "{} {}",
-                            "Warning:".yellow(),
-                            format!("Failed to save history: {}", e)
-                        );
-                    }
-
-                    // Execute command
-                    if let Err(e) = self.execute_command(line) {
-                        eprintln!("{} {}", "Error:".red(), e);
-                    }
-
-                    // Update completion state with current directory after command execution
-                    self.update_completion_state();
-                }
-                Ok(Signal::CtrlD) => {
-                    println!();
-                    println!("Goodbye!");
-                    break;
-                }
-                Ok(Signal::CtrlC) => {
-                    println!();
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("{} {}", "Error:".red(), e);
-                    break;
-                }
-            }
-        }
-
-        Ok(())
+    let mut input = String::new();
+    match io::stdin().read_line(&mut input) {
+        Ok(0) => Ok(None), // EOF
+        Ok(_) => Ok(Some(input)),
+        Err(e) => Err(e.into()),
     }
 }
 
-/// Initialize WinuxCmd daemon
-fn initialize_winuxcmd() -> anyhow::Result<()> {
-    // Initialize WinuxCmd FFI (direct DLL execution, no daemon needed)
-    WinuxCmdFFI::init().map_err(|e| anyhow::anyhow!("{}", e))?;
+/// Execute a line of input.
+fn execute_line(
+    input: &str,
+    state: &mut ShellState,
+    executor: &mut Executor,
+) -> Result<i32, ShellError> {
+    // Tokenize
+    let tokens = Lexer::tokenize(input)?;
 
-    if WinuxCmdFFI::is_initialized() {
-        return Ok(());
+    // Parse
+    let stmts = Parser::parse(tokens)?;
+
+    // Execute
+    executor.execute(&stmts, state)
+}
+
+/// Execute a command string.
+fn execute_command(cmd: &str) -> i32 {
+    let mut state = ShellState::new();
+    let mut executor = Executor::new();
+
+    match execute_line(cmd, &mut state, &mut executor) {
+        Ok(code) => code,
+        Err(ShellError::Exit(code)) => code,
+        Err(e) => {
+            eprintln!("winsh: {}", e);
+            1
+        }
+    }
+}
+
+/// Execute a script file.
+fn execute_script(path: &str) -> i32 {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("winsh: {}: {}", path, e);
+            return 1;
+        }
+    };
+
+    let mut state = ShellState::new();
+    let mut executor = Executor::new();
+    let mut exit_code = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        match execute_line(trimmed, &mut state, &mut executor) {
+            Ok(code) => {
+                exit_code = code;
+            }
+            Err(ShellError::Exit(code)) => {
+                return code;
+            }
+            Err(e) => {
+                eprintln!("winsh: {}", e);
+                exit_code = 1;
+            }
+        }
     }
 
-    Err(anyhow::anyhow!("Failed to initialize WinuxCmd FFI. Please ensure winuxcore.dll is available."))
+    exit_code
+}
+
+/// Print help message.
+fn print_help() {
+    println!("WinSH - A zsh-compatible shell for Windows");
+    println!();
+    println!("USAGE:");
+    println!("    winsh              Start interactive shell");
+    println!("    winsh -c 'CMD'     Execute command and exit");
+    println!("    winsh SCRIPT       Execute script file");
+    println!("    winsh --help       Show this help");
+    println!("    winsh --version    Show version");
+    println!();
+    println!("BUILT-IN COMMANDS:");
+    println!("    cd [DIR]           Change directory");
+    println!("    echo [TEXT]        Display text");
+    println!("    exit [N]           Exit the shell");
+    println!("    pwd                Print working directory");
+    println!("    type COMMAND       Show command type");
+    println!("    help               Show this help");
+    println!();
+    println!("For more information, see the documentation.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execute_echo() {
+        let code = execute_command("echo hello");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_execute_exit() {
+        let code = execute_command("exit 42");
+        assert_eq!(code, 42);
+    }
+
+    #[test]
+    fn test_execute_unknown_command() {
+        let code = execute_command("nonexistent_command_12345");
+        assert_ne!(code, 0);
+    }
 }
