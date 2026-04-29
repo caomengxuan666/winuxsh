@@ -91,6 +91,7 @@ env_logger.workspace = true
 colored.workspace = true
 dirs.workspace = true
 nu-ansi-term.workspace = true
+terminal_size = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

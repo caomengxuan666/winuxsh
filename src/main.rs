@@ -3,6 +3,7 @@
 //! A zsh-compatible shell for Windows, written in Rust.
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process;
 
 use anyhow::Result;
@@ -63,12 +64,96 @@ fn run_repl() -> Result<()> {
         debug!("Failed to load history: {}", e);
     }
 
+    // Load shell configuration
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let winshrc = home.join(".winshrc");
+    if winshrc.exists() {
+        debug!("Loading config: {}", winshrc.display());
+        match std::fs::read_to_string(&winshrc) {
+            Ok(content) => {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    // Handle source command
+                    if let Some(path) = trimmed.strip_prefix("source ") {
+                        let path = path.trim().trim_matches('"').trim_matches('\'');
+                        let source_path = if path.starts_with("$HOME") || path.starts_with("~") {
+                            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                            let rest = path.replacen("$HOME", &home.to_string_lossy(), 1)
+                                .replacen("~", &home.to_string_lossy(), 1);
+                            PathBuf::from(rest)
+                        } else {
+                            PathBuf::from(path)
+                        };
+                        if source_path.exists() {
+                            if let Ok(source_content) = std::fs::read_to_string(&source_path) {
+                                for src_line in source_content.lines() {
+                                    execute_config_line(src_line, &mut state, &mut executor);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Handle variable assignments
+                    if let Some((name, value)) = trimmed.split_once('=') {
+                        let name = name.trim();
+                        let value = value.trim().trim_matches('"').trim_matches('\'');
+                        match name {
+                            "WINUXSH_THEME" => state.config.theme = value.to_string(),
+                            "PROMPT" | "PS1" => state.config.prompt = value.to_string(),
+                            "RPROMPT" => state.config.rprompt = value.to_string(),
+                            _ if name.chars().all(|c| c.is_alphanumeric() || c == '_') => {
+                                state.env.set(name, value);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // Handle export
+                    if let Some(rest) = trimmed.strip_prefix("export ") {
+                        let rest = rest.trim();
+                        if let Some((name, value)) = rest.split_once('=') {
+                            state.env.export(name.trim(), value.trim().trim_matches('"').trim_matches('\''));
+                        }
+                        continue;
+                    }
+                    // Handle setopt
+                    if let Some(opt) = trimmed.strip_prefix("setopt ") {
+                        let opt = opt.trim();
+                        apply_option(opt, true, &mut state);
+                        continue;
+                    }
+                    // Handle alias
+                    if let Some(rest) = trimmed.strip_prefix("alias ") {
+                        let rest = rest.trim();
+                        if let Some((name, value)) = rest.split_once('=') {
+                            let value = value.trim().trim_matches('\'').trim_matches('"');
+                            state.set_alias(name.trim().to_string(), value.to_string());
+                        }
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("Failed to read config: {}", e);
+            }
+        }
+    }
+
     println!("WinSH {} - zsh-compatible shell for Windows", env!("CARGO_PKG_VERSION"));
+    println!();
 
     loop {
         let ctx = build_prompt_context(&state);
         let prompt = render_prompt(&state.config.prompt, &ctx);
-        let input = read_line(&prompt)?;
+        let rprompt = if state.config.rprompt.is_empty() {
+            String::new()
+        } else {
+            render_prompt(&state.config.rprompt, &ctx)
+        };
+        let input = read_line_with_rprompt(&prompt, &rprompt)?;
 
         if input.is_none() {
             println!();
@@ -145,6 +230,122 @@ fn read_line(prompt: &str) -> Result<Option<String>> {
         Ok(0) => Ok(None),
         Ok(_) => Ok(Some(input.trim_end().to_string())),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Read a line with right prompt support.
+fn read_line_with_rprompt(prompt: &str, rprompt: &str) -> Result<Option<String>> {
+    print!("{}", prompt);
+    if !rprompt.is_empty() {
+        // Save cursor, move to right, print RPROMPT, restore cursor
+        print!("\x1b[s");
+        // Get terminal width (default to 80)
+        let width = term_width().unwrap_or(80);
+        let rprompt_len = strip_ansi(rprompt).len();
+        if rprompt_len < width as usize {
+            let col = width as usize - rprompt_len;
+            print!("\x1b[{}G{}", col, rprompt);
+        }
+        print!("\x1b[u");
+    }
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    match io::stdin().read_line(&mut input) {
+        Ok(0) => Ok(None),
+        Ok(_) => Ok(Some(input.trim_end().to_string())),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Get terminal width.
+fn term_width() -> Option<u16> {
+    if let Some((w, _)) = terminal_size::terminal_size() {
+        Some(w.0)
+    } else {
+        None
+    }
+}
+
+/// Strip ANSI escape sequences for length calculation.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Apply a shell option from config.
+fn apply_option(option: &str, value: bool, state: &mut ShellState) {
+    let opts = state.options_mut();
+    match option {
+        "errexit" | "e" => opts.errexit = value,
+        "nounset" | "u" => opts.nounset = value,
+        "noglob" | "f" => opts.noglob = value,
+        "extended_glob" => opts.extended_glob = value,
+        "null_glob" => opts.null_glob = value,
+        "glob_dots" => opts.glob_dots = value,
+        "case_glob" => opts.case_glob = value,
+        "hist_ignore_dups" => opts.hist_ignore_dups = value,
+        "hist_ignore_all_dups" => opts.hist_ignore_all_dups = value,
+        "hist_ignore_space" => opts.hist_ignore_space = value,
+        "prompt_subst" => opts.prompt_subst = value,
+        "prompt_percent" => opts.prompt_percent = value,
+        "brace_expand" => opts.brace_expand = value,
+        "tilde_expand" => opts.tilde_expand = value,
+        "variable_expand" => opts.variable_expand = value,
+        "command_subst" => opts.command_subst = value,
+        "arith_expand" => opts.arith_expand = value,
+        "monitor" | "m" => opts.monitor = value,
+        _ => {}
+    }
+}
+
+/// Execute a single config line.
+fn execute_config_line(line: &str, state: &mut ShellState, executor: &mut Executor) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return;
+    }
+    // Handle PROMPT/RPROMPT assignments
+    if let Some(rest) = trimmed.strip_prefix("PROMPT=") {
+        state.config.prompt = rest.trim().to_string();
+        return;
+    }
+    if let Some(rest) = trimmed.strip_prefix("PS1=") {
+        state.config.prompt = rest.trim().to_string();
+        return;
+    }
+    if let Some(rest) = trimmed.strip_prefix("RPROMPT=") {
+        state.config.rprompt = rest.trim().to_string();
+        return;
+    }
+    // Handle variable exports from themes
+    if let Some((name, value)) = trimmed.split_once('=') {
+        let name = name.trim();
+        if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            match name {
+                "WINUXSH_THEME" => state.config.theme = value.to_string(),
+                "PROMPT" | "PS1" => state.config.prompt = value.to_string(),
+                "RPROMPT" => state.config.rprompt = value.to_string(),
+                _ => { state.env.set(name, value); }
+            }
+        }
     }
 }
 

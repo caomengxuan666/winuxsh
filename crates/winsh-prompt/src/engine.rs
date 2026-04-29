@@ -208,29 +208,27 @@ pub fn render_prompt(template: &str, ctx: &PromptContext) -> String {
             match chars.next() {
                 Some('n') => result.push_str(&ctx.username),
                 Some('m') => {
-                    // Short hostname (up to first dot)
                     let hostname = &ctx.hostname;
                     let short = hostname.split('.').next().unwrap_or(hostname);
                     result.push_str(short);
                 }
                 Some('M') => result.push_str(&ctx.hostname),
                 Some('~') => {
-                    // Current directory with ~ for home
                     if let Some(ref home) = ctx.home {
                         if let Ok(rel) = ctx.cwd.strip_prefix(home) {
                             result.push('~');
                             if !rel.as_os_str().is_empty() {
                                 result.push('/');
-                                result.push_str(&rel.to_string_lossy());
+                                result.push_str(&rel.to_string_lossy().replace('\\', "/"));
                             }
                         } else {
-                            result.push_str(&ctx.cwd.to_string_lossy());
+                            result.push_str(&ctx.cwd.to_string_lossy().replace('\\', "/"));
                         }
                     } else {
-                        result.push_str(&ctx.cwd.to_string_lossy());
+                        result.push_str(&ctx.cwd.to_string_lossy().replace('\\', "/"));
                     }
                 }
-                Some('d') => result.push_str(&ctx.cwd.to_string_lossy()),
+                Some('d') => result.push_str(&ctx.cwd.to_string_lossy().replace('\\', "/")),
                 Some('#') => {
                     if is_root() {
                         result.push('#');
@@ -239,22 +237,14 @@ pub fn render_prompt(template: &str, ctx: &PromptContext) -> String {
                     }
                 }
                 Some('?') => result.push_str(&ctx.exit_code.to_string()),
-                Some('T') => {
-                    result.push_str(&format_time("%H:%M"));
-                }
-                Some('t') => {
-                    result.push_str(&format_time("%I:%M %p"));
-                }
+                Some('T') => result.push_str(&format_time("%H:%M")),
+                Some('t') => result.push_str(&format_time("%I:%M %p")),
                 Some('D') => {
-                    // %D{fmt} - date/time with format
                     if chars.peek() == Some(&'{') {
-                        chars.next(); // skip {
+                        chars.next();
                         let mut fmt = String::new();
                         while let Some(&c) = chars.peek() {
-                            if c == '}' {
-                                chars.next();
-                                break;
-                            }
+                            if c == '}' { chars.next(); break; }
                             fmt.push(chars.next().unwrap());
                         }
                         result.push_str(&format_time(&fmt));
@@ -266,15 +256,11 @@ pub fn render_prompt(template: &str, ctx: &PromptContext) -> String {
                 Some('U') => result.push_str("\x1b[4m"),
                 Some('u') => result.push_str("\x1b[24m"),
                 Some('F') => {
-                    // %F{color} - foreground color
                     if chars.peek() == Some(&'{') {
-                        chars.next(); // skip {
+                        chars.next();
                         let mut color_name = String::new();
                         while let Some(&c) = chars.peek() {
-                            if c == '}' {
-                                chars.next();
-                                break;
-                            }
+                            if c == '}' { chars.next(); break; }
                             color_name.push(chars.next().unwrap());
                         }
                         if let Some(color) = PromptColor::parse(&color_name) {
@@ -284,15 +270,11 @@ pub fn render_prompt(template: &str, ctx: &PromptContext) -> String {
                 }
                 Some('f') => result.push_str("\x1b[39m"),
                 Some('K') => {
-                    // %K{color} - background color
                     if chars.peek() == Some(&'{') {
-                        chars.next(); // skip {
+                        chars.next();
                         let mut color_name = String::new();
                         while let Some(&c) = chars.peek() {
-                            if c == '}' {
-                                chars.next();
-                                break;
-                            }
+                            if c == '}' { chars.next(); break; }
                             color_name.push(chars.next().unwrap());
                         }
                         if let Some(color) = PromptColor::parse(&color_name) {
@@ -314,10 +296,7 @@ pub fn render_prompt(template: &str, ctx: &PromptContext) -> String {
                 Some('N') => result.push_str(&ctx.shell_name),
                 Some('i') => result.push_str(&ctx.line_number.to_string()),
                 Some('%') => result.push('%'),
-                Some(c) => {
-                    result.push('%');
-                    result.push(c);
-                }
+                Some(c) => { result.push('%'); result.push(c); }
                 None => result.push('%'),
             }
         } else {
