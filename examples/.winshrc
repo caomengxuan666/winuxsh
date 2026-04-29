@@ -1,0 +1,66 @@
+# WinSH Shell Configuration
+# Place this file at ~/.winshrc
+# This is executed as a shell script when WinSH starts in interactive mode.
+
+# === Prompt Configuration ===
+# Zsh-style prompt escape sequences:
+#   %n - username   %m - hostname    %~ - current dir (with ~)
+#   %# - # for admin, % for user     %? - exit code
+#   %T - time (24h)  %j - job count
+#   %F{color} - foreground color     %f - reset foreground
+#   %K{color} - background color     %k - reset background
+#   %B - bold         %b - reset bold
+#   %U - underline    %u - reset underline
+
+PROMPT="%F{green}%n@%m%f %F{blue}%~%f %# "
+RPROMPT=""
+PS2="%_> "
+
+# === Shell Options ===
+# setopt option_name    - enable option
+# unsetopt option_name  - disable option
+
+# Error handling
+setopt errexit        # Exit on error (be careful with this!)
+
+# Glob options
+# setopt extended_glob  # Extended glob patterns
+# setopt glob_dots     # Include dotfiles in glob
+# setopt null_glob     # Remove unmatched patterns
+
+# History options
+setopt hist_ignore_dups       # Ignore duplicate consecutive entries
+setopt hist_ignore_space      # Ignore entries starting with space
+# setopt hist_ignore_all_dups # Ignore all duplicate entries
+
+# Prompt options
+setopt prompt_subst    # Enable prompt substitution
+setopt prompt_percent  # Enable percent sequences in prompt
+
+# Expansion options
+setopt brace_expand    # Enable brace expansion {a,b}
+setopt tilde_expand    # Enable tilde expansion ~
+setopt variable_expand # Enable variable expansion
+setopt command_subst   # Enable command substitution
+setopt arith_expand    # Enable arithmetic expansion
+
+# Job control
+setopt monitor         # Enable job control
+# setopt notify        # Report job completion immediately
+
+# === Aliases ===
+alias ll='ls -la'
+alias la='ls -a'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias grep='grep --color=auto'
+alias h='history'
+
+# === Environment Variables ===
+export EDITOR='vim'
+export PAGER='less'
+export LANG='en_US.UTF-8'
+
+# Add custom paths
+# export PATH="$HOME/bin:$PATH"

@@ -476,4 +476,75 @@ mod tests {
         assert!(options.prompt_subst);
         assert!(options.emacs_mode);
     }
+
+    #[test]
+    fn test_shell_state_pid() {
+        let state = ShellState::new();
+        assert!(state.shell_pid() > 0);
+    }
+
+    #[test]
+    fn test_shell_state_last_bg_pid() {
+        let mut state = ShellState::new();
+        state.set_last_bg_pid(1234);
+        assert_eq!(state.last_bg_pid(), 1234);
+    }
+
+    #[test]
+    fn test_shell_state_set_current_dir() {
+        let mut state = ShellState::new();
+        let new_dir = std::env::current_dir().unwrap();
+        state.set_current_dir(new_dir.clone());
+        assert_eq!(state.current_dir(), &new_dir);
+    }
+
+    #[test]
+    fn test_shell_state_remove_function() {
+        let mut state = ShellState::new();
+        state.define_function("test".to_string(), vec![]);
+        assert!(state.has_function("test"));
+        state.remove_function("test");
+        assert!(!state.has_function("test"));
+    }
+
+    #[test]
+    fn test_shell_state_remove_alias() {
+        let mut state = ShellState::new();
+        state.set_alias("ll".to_string(), "ls -la".to_string());
+        assert!(state.has_alias("ll"));
+        state.remove_alias("ll");
+        assert!(!state.has_alias("ll"));
+    }
+
+    #[test]
+    fn test_shell_state_function_names() {
+        let mut state = ShellState::new();
+        state.define_function("a".to_string(), vec![]);
+        state.define_function("b".to_string(), vec![]);
+        let names = state.function_names();
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn test_shell_state_pipe_status() {
+        let mut state = ShellState::new();
+        state.set_pipe_status(vec![0, 1, 0]);
+        assert_eq!(state.pipe_status(), &[0, 1, 0]);
+    }
+
+    #[test]
+    fn test_shell_state_shell_level() {
+        let mut state = ShellState::new();
+        assert_eq!(state.shell_level(), 0);
+        state.increment_shell_level();
+        assert_eq!(state.shell_level(), 1);
+    }
+
+    #[test]
+    fn test_shell_state_readonly() {
+        let mut state = ShellState::new();
+        assert!(!state.is_readonly("VAR"));
+        state.set_readonly("VAR".to_string(), crate::Value::string("test"));
+        assert!(state.is_readonly("VAR"));
+    }
 }

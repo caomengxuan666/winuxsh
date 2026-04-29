@@ -11,3 +11,4 @@ winsh-core.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 log.workspace = true
+dirs.workspace = true

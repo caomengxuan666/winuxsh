@@ -1,17 +1,10 @@
 //! Redirection handling.
 
-/// Redirection handler.
-pub struct RedirectionHandler;
-
-impl RedirectionHandler {
-    /// Create a new redirection handler.
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for RedirectionHandler {
-    fn default() -> Self {
-        Self::new()
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_redir_module() {
+        // Placeholder - redirection tests are in integration tests
+        assert!(true);
     }
 }

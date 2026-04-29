@@ -1,7 +1,3 @@
-//! # WinSH Prompt
-//!
-//! Prompt system for the WinSH shell.
-
 pub mod engine;
 
-pub use engine::PromptEngine;
+pub use engine::{render_prompt, PromptContext, PromptTheme, PromptColor};

@@ -11,6 +11,7 @@ pub mod expansion;
 pub mod arithmetic;
 pub mod conditional;
 pub mod heredoc;
+pub mod glob;
 
 pub use error::ShellError;
 pub use state::ShellState;
@@ -21,3 +22,4 @@ pub use expansion::expand_variable;
 pub use arithmetic::eval_arithmetic;
 pub use conditional::eval_conditional;
 pub use heredoc::{HereDoc, read_heredoc, parse_heredocs};
+pub use glob::{expand_globs, match_pattern, GlobOptions};
