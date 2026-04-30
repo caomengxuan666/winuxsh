@@ -18,10 +18,13 @@ use crate::config::ShellConfig;
 use crate::error::{Result, ShellError};
 use crate::executor::Executor;
 use crate::job::JobManager;
-use crate::parser::Parser;
+use winsh_lexer::Lexer;
+use winsh_parser::Parser;
+use winsh_ast::{Stmt, Word};
+use winsh_ast::word::WordPart;
+use crate::tokenizer::{CommandInfo, ParsedCommand};
 use crate::plugin::PluginManager;
 use crate::theme::ThemePlugin;
-use crate::tokenizer::{CommandInfo, ParsedCommand, Tokenizer};
 use glob;
 
 /// Main shell structure
@@ -407,15 +410,28 @@ impl Shell {
         let username = self.get_env_var("USERNAME", "user");
         let hostname = self.get_env_var("COMPUTERNAME", "localhost");
         let dir = self.current_dir.display().to_string();
+        
+        // Replace home directory with ~ for cleaner display
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home_str = home_dir.display().to_string();
+        let dir_display = if dir.starts_with(&home_str) {
+            if dir == home_str {
+                "~".to_string()
+            } else {
+                format!("~{}", &dir[home_str.len()..])
+            }
+        } else {
+            dir
+        };
 
         // Use theme plugin if available, otherwise use default colors
         let prompt_text = if let ThemePlugin::Theme(ref theme) = self.theme_plugin {
-            theme.generate_prompt(&username, &hostname, &dir, "$ ")
+            theme.generate_prompt(&username, &hostname, &dir_display, "$ ")
         } else {
             // Default colored prompt
             format!(
                 "\x1b[1;32m{}@{}\x1b[0m \x1b[1;34m{}\x1b[0m $ ",
-                username, hostname, dir
+                username, hostname, dir_display
             )
         };
 
@@ -489,11 +505,12 @@ impl Shell {
 
     /// Execute a command
     pub fn execute_command(&mut self, command: &str) -> Result<()> {
-        // Tokenize the command
-        let tokens = Tokenizer::tokenize(command)?;
+        // Tokenize using new lexer
+        let tokens = Lexer::tokenize(command).map_err(|e| ShellError::Parse(e.to_string()))?;
+        let stmts = Parser::parse(tokens).map_err(|e| ShellError::Parse(e.to_string()))?;
 
-        // Parse the tokens into an AST
-        let parsed = Parser::parse(&tokens)?;
+        // Convert new AST to old ParsedCommand for backward compatibility
+        let parsed = convert_to_parsed_command(&stmts);
 
         // Execute the parsed command
         self.execute_parsed(&parsed)?;
@@ -663,11 +680,44 @@ impl Shell {
                 self.last_exit_code = exit_code;
                 Ok(())
             }
+            Err(ShellError::CommandNotFound(_)) => {
+                // Fallback: try via winuxcmd.exe for Unix-style commands
+                self.try_winuxcmd_fallback(&clean_command, &args, &cmd_info)
+            }
             Err(e) => {
-                self.last_exit_code = match e {
-                    ShellError::CommandNotFound(_) => 127,
-                    _ => 1,
-                };
+                self.last_exit_code = 1;
+                eprintln!("{} {}", "Error:".red(), e);
+                Ok(())
+            }
+        }
+    }
+
+    /// Try executing a command via winuxcmd.exe as a fallback
+    fn try_winuxcmd_fallback(
+        &mut self,
+        command: &str,
+        args: &[String],
+        cmd_info: &CommandInfo,
+    ) -> Result<()> {
+        let winuxcmd = match find_winuxcmd_in_path() {
+            Ok(Some(p)) => p,
+            _ => {
+                self.last_exit_code = 127;
+                eprintln!("{} {}", "Error:".red(), format!("Command '{}' not found", command));
+                return Ok(());
+            }
+        };
+
+        let env_vars: Vec<(String, ArrayValue)> = self
+            .env_vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let executor = Executor::new(&env_vars, &self.current_dir);
+        let mut winuxcmd_args = vec![command.to_string()];
+        winuxcmd_args.extend(args.iter().cloned());
+
+        match executor.execute(&winuxcmd.to_string_lossy(), &winuxcmd_args, cmd_info) {
+            Ok(code) => { self.last_exit_code = code; Ok(()) }
+            Err(e) => {
+                self.last_exit_code = 127;
                 eprintln!("{} {}", "Error:".red(), e);
                 Ok(())
             }
@@ -1704,6 +1754,133 @@ impl Shell {
             }
         }
         s.to_string()
+    }
+}
+
+/// Expand a Word (from new parser) into a plain String by resolving variables etc.
+fn expand_word(word: &Word, env_vars: &HashMap<String, String>) -> String {
+    let mut result = String::new();
+    for part in &word.parts {
+        match part {
+            WordPart::Literal(s) => result.push_str(s),
+            WordPart::Variable(name) => {
+                result.push_str(env_vars.get(name).map(|s| s.as_str()).unwrap_or(""));
+            }
+            WordPart::BracedVariable(spec) => {
+                // Simple expansion for ${VAR} - strip braces and expand
+                let var_name = spec.trim_matches(|c: char| c == '{' || c == '}');
+                if let Some(val) = env_vars.get(var_name) {
+                    result.push_str(val);
+                }
+            }
+            WordPart::SingleQuoted(s) => result.push_str(s),
+            WordPart::DollarQuoted(s) => result.push_str(s),
+            WordPart::DoubleQuoted(inner) => {
+                // Recursively expand inner parts of double-quoted string
+                for p in inner {
+                    match p {
+                        WordPart::Literal(ref s) => result.push_str(s),
+                        WordPart::Variable(ref name) => {
+                            result.push_str(env_vars.get(name.as_str()).map(|s| s.as_str()).unwrap_or(""));
+                        }
+                        WordPart::BracedVariable(ref spec) => {
+                            let var_name = spec.trim_matches(|c: char| c == '{' || c == '}');
+                            result.push_str(env_vars.get(var_name).unwrap_or(&String::new()));
+                        }
+                        _ => result.push_str(&p.to_string()),
+                    }
+                }
+            }
+            _ => result.push_str(&part.to_string()),
+        }
+    }
+    result
+}
+
+/// Find winuxcmd.exe in system PATH
+fn find_winuxcmd_in_path() -> Result<Option<PathBuf>> {
+    for name in &["winuxcmd.exe", "coreutils.exe", "uutils.exe"] {
+        if let Some(p) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&p) {
+                let full = dir.join(name);
+                if full.exists() {
+                    return Ok(Some(full));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Convert new parser's Vec<Stmt> to old ParsedCommand for backward compatibility.
+fn convert_to_parsed_command(stmts: &[Stmt]) -> ParsedCommand {
+    if stmts.is_empty() {
+        return ParsedCommand::Single(CommandInfo::default());
+    }
+    if stmts.len() == 1 {
+        convert_stmt(&stmts[0])
+    } else {
+        // Multiple statements → Sequence
+        let cmds: Vec<ParsedCommand> = stmts.iter().map(convert_stmt).collect();
+        ParsedCommand::Sequence(cmds)
+    }
+}
+
+fn convert_stmt(stmt: &Stmt) -> ParsedCommand {
+    match stmt {
+        Stmt::Command { words, redirections, background } => {
+            let args: Vec<String> = words.iter().map(|w| expand_word(w, &HashMap::new())).collect();
+            let mut cmd = CommandInfo::default();
+            cmd.args = args;
+            cmd.background = *background;
+            // Convert redirections
+            for redir in redirections {
+                match &redir.target {
+                    winsh_ast::redir::RedirTarget::File(word) => {
+                        let file = expand_word(word, &HashMap::new());
+                        match redir.op {
+                            winsh_ast::redir::RedirOp::In => { cmd.stdin_redir = Some(file); }
+                            winsh_ast::redir::RedirOp::Out => { cmd.stdout_redir = Some(file); }
+                            winsh_ast::redir::RedirOp::Append => { cmd.stdout_redir = Some(file); cmd.stdout_append = true; }
+                            winsh_ast::redir::RedirOp::Err => { cmd.stderr_redir = Some(file); }
+                            winsh_ast::redir::RedirOp::ErrAppend => { cmd.stderr_redir = Some(file); cmd.stderr_append = true; }
+                            winsh_ast::redir::RedirOp::ErrToOut => { cmd.stderr_to_stdout = true; }
+                            winsh_ast::redir::RedirOp::OutToErr => { cmd.stdout_to_stderr = true; }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ParsedCommand::Single(cmd)
+        }
+        Stmt::Pipeline { commands, negated: _ } => {
+            let cmds: Vec<CommandInfo> = commands.iter().filter_map(|s| {
+                if let Stmt::Command { words, .. } = s {
+                    let args: Vec<String> = words.iter().map(|w| expand_word(w, &HashMap::new())).collect();
+                    let mut cmd = CommandInfo::default();
+                    cmd.args = args;
+                    Some(cmd)
+                } else {
+                    None
+                }
+            }).collect();
+            ParsedCommand::Pipeline(cmds)
+        }
+        Stmt::And { left, right } => {
+            ParsedCommand::And(Box::new(convert_stmt(left)), Box::new(convert_stmt(right)))
+        }
+        Stmt::Or { left, right } => {
+            ParsedCommand::Or(Box::new(convert_stmt(left)), Box::new(convert_stmt(right)))
+        }
+        Stmt::Sequence(stmts) => {
+            let cmds: Vec<ParsedCommand> = stmts.iter().map(convert_stmt).collect();
+            ParsedCommand::Sequence(cmds)
+        }
+        _ => {
+            // For unsupported statement types, return empty command
+            ParsedCommand::Single(CommandInfo::default())
+        }
     }
 }
 

@@ -137,7 +137,8 @@ impl WinuxCmdFFI {
 
     /// Check if WinuxCmd FFI is initialized and ready
     pub fn is_initialized() -> bool {
-        unsafe { FFI_LIBRARY.is_some() }
+        // FFI mode disabled - fall back to system PATH execution
+        false
     }
 
     /// Execute a WinuxCmd command directly via DLL

@@ -108,7 +108,6 @@ mod error;
 mod executor;
 mod job;
 mod oh_my_winuxsh;
-mod parser;
 mod plugin;
 mod shell;
 mod theme;
