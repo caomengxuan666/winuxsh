@@ -341,7 +341,36 @@ impl Executor {
 
     /// Build a Command with environment and working directory.
     fn build_command(&self, cmd_path: &PathBuf, args: &[&str], state: &ShellState) -> Command {
-        let mut command = Command::new(cmd_path);
+        let mut command;
+
+        // Handle special file types on Windows
+        #[cfg(windows)]
+        {
+            let ext = cmd_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            match ext.to_lowercase().as_str() {
+                "cmd" | "bat" => {
+                    // Run .cmd/.bat through cmd.exe
+                    command = Command::new("cmd.exe");
+                    command.arg("/C");
+                    command.arg(cmd_path);
+                }
+                "ps1" => {
+                    // Run .ps1 through powershell.exe
+                    command = Command::new("powershell.exe");
+                    command.args(["-ExecutionPolicy", "Bypass", "-File"]);
+                    command.arg(cmd_path);
+                }
+                _ => {
+                    command = Command::new(cmd_path);
+                }
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            command = Command::new(cmd_path);
+        }
+
         command.args(args);
 
         for (key, value) in state.env.exported() {

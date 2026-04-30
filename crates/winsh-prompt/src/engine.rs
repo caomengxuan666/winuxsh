@@ -295,6 +295,52 @@ pub fn render_prompt(template: &str, ctx: &PromptContext) -> String {
                 }
                 Some('N') => result.push_str(&ctx.shell_name),
                 Some('i') => result.push_str(&ctx.line_number.to_string()),
+                Some('(') => {
+                    // %(condition.true.false) - conditional rendering
+                    // Common: %(?..✘ %?) - if exit code non-zero, show ✘ and exit code
+                    // %(?success_text.failure_text)
+                    let mut cond = String::new();
+                    let mut depth = 1;
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c == '(' {
+                            depth += 1;
+                        } else if c == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        cond.push(c);
+                    }
+                    // Parse condition.true.false
+                    let parts: Vec<&str> = cond.splitn(3, '.').collect();
+                    if parts.len() >= 3 {
+                        let condition = parts[0];
+                        let true_text = parts[1];
+                        let false_text = parts[2];
+                        let condition_result = match condition {
+                            "?" => ctx.exit_code == 0,
+                            _ => false,
+                        };
+                        let text = if condition_result { true_text } else { false_text };
+                        // Replace %? in text with exit code
+                        let text = text.replace("%?", &ctx.exit_code.to_string());
+                        result.push_str(&text);
+                    } else if parts.len() == 2 {
+                        // Simple conditional %(?..text)
+                        let condition = parts[0];
+                        let text = parts[1];
+                        let condition_result = match condition {
+                            "?" => ctx.exit_code != 0,
+                            _ => false,
+                        };
+                        if condition_result {
+                            let text = text.replace("%?", &ctx.exit_code.to_string());
+                            result.push_str(&text);
+                        }
+                    }
+                }
                 Some('%') => result.push('%'),
                 Some(c) => { result.push('%'); result.push(c); }
                 None => result.push('%'),

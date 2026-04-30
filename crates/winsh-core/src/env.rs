@@ -28,8 +28,15 @@ impl Env {
     /// Create an environment initialized from the current process environment.
     pub fn from_process() -> Self {
         let mut env = Self::new();
+        // Import all environment variables
         for (key, value) in env::vars() {
             env.exports.insert(key, value);
+        }
+        // Ensure PATH is always available (some contexts might not export it)
+        if env.exports.get("PATH").is_none() {
+            if let Ok(path) = env::var("PATH") {
+                env.exports.insert("PATH".to_string(), path);
+            }
         }
         env
     }

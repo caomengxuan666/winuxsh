@@ -73,6 +73,51 @@ fn run_repl() -> Result<()> {
     let mut executor = Executor::new();
     let mut history = HistoryManager::new();
 
+    // Inherit environment variables from Windows
+    for (key, value) in std::env::vars() {
+        state.env.export(&key, &value);
+    }
+
+    // Ensure critical shell variables exist (Windows might not have them)
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if state.env.get("HOME").is_none() {
+        state.env.export("HOME", home.to_string_lossy());
+    }
+    if state.env.get("PATH").is_none() {
+        // Fallback PATH with common Windows directories
+        let default_path = format!(
+            "C:\\Windows\\System32;C:\\Windows;{}\\AppData\\Local\\Microsoft\\WindowsApps",
+            home.display()
+        );
+        state.env.export("PATH", &default_path);
+    }
+    if state.env.get("USER").is_none() {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
+        state.env.export("USER", &user);
+    }
+    if state.env.get("LOGNAME").is_none() {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
+        state.env.export("LOGNAME", &user);
+    }
+    if state.env.get("HOSTNAME").is_none() {
+        let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string());
+        state.env.export("HOSTNAME", &hostname);
+    }
+    if state.env.get("SHELL").is_none() {
+        let shell = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "winsh".to_string());
+        state.env.export("SHELL", &shell);
+    }
+    if state.env.get("TERM").is_none() {
+        state.env.export("TERM", "xterm-256color");
+    }
+
+    state.env.set("0", "winsh");
+
+    debug!("HOME={}", state.env.get("HOME").unwrap_or("(not set)"));
+    debug!("PATH length={}", state.env.get("PATH").map(|p| p.len()).unwrap_or(0));
+
     if let Err(e) = history.load() {
         warn!("Failed to load history: {}", e);
     }
@@ -162,6 +207,11 @@ fn run_repl() -> Result<()> {
             Err(ShellError::Exit(code)) => {
                 history.save()?;
                 process::exit(code);
+            }
+            Err(ShellError::Interrupted) => {
+                // Ctrl+C during command execution - continue the loop
+                println!();
+                continue;
             }
             Err(e) => {
                 eprintln!("winsh: {}", e);
@@ -269,21 +319,33 @@ fn process_config_content(
 fn expand_config_line(line: &str, home_str: &str, state: &ShellState) -> String {
     let mut result = line.to_string();
 
-    // Expand $HOME (but not inside %{} sequences which are prompt escapes)
+    // Expand $HOME first (most common)
     result = result.replace("$HOME", home_str);
 
     // Expand shell variables from state
+    // Sort by name length descending to avoid partial matches
+    // e.g., WINUXSH_SYMBOL_HOME should not match $HOME
     let mut vars: Vec<(String, String)> = state.env.all().into_iter().collect();
-    vars.sort_by(|a, b| b.0.len().cmp(&a.0.len())); // Longest first
+    vars.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     for (name, value) in &vars {
+        // Use ${VAR} form to avoid partial matches
         result = result.replace(&format!("${{{}}}", name), value);
-        result = result.replace(&format!("${}", name), value);
     }
 
-    // Don't expand ~ inside prompt escape sequences (%~ is a valid prompt escape)
-    // Only expand ~ at the beginning of paths
-    // This is handled by the caller if needed
+    // Now expand $VAR form, but only for variables that don't have
+    // a longer variable name starting with the same prefix
+    // This prevents $HOME from matching WINUXSH_SYMBOL_HOME
+    for (name, value) in &vars {
+        let pattern = format!("${}", name);
+        // Check if this pattern is a prefix of any longer variable name
+        let is_prefix = vars.iter().any(|(other_name, _)| {
+            other_name.len() > name.len() && other_name.starts_with(name.as_str())
+        });
+        if !is_prefix {
+            result = result.replace(&pattern, value);
+        }
+    }
 
     result
 }
@@ -432,6 +494,28 @@ fn execute_line(input: &str, state: &mut ShellState, executor: &mut Executor) ->
 fn execute_command(cmd: &str) -> i32 {
     let mut state = ShellState::new();
     let mut executor = Executor::new();
+
+    // Inherit environment variables
+    for (key, value) in std::env::vars() {
+        state.env.export(&key, &value);
+    }
+
+    // Ensure critical variables exist
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if state.env.get("HOME").is_none() {
+        state.env.export("HOME", home.to_string_lossy());
+    }
+    if state.env.get("PATH").is_none() {
+        let default_path = format!(
+            "C:\\Windows\\System32;C:\\Windows;{}\\AppData\\Local\\Microsoft\\WindowsApps",
+            home.display()
+        );
+        state.env.export("PATH", &default_path);
+    }
+    if state.env.get("USER").is_none() {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
+        state.env.export("USER", &user);
+    }
 
     match execute_line(cmd, &mut state, &mut executor) {
         Ok(code) => code,
