@@ -374,7 +374,7 @@ impl Shell {
                     match name {
                         "WINUXSH_THEME" => { /* theme handled by config */ }
                         "PROMPT" | "PS1" => {
-                            // Store prompt format
+                            std::env::set_var(name, value);
                             self.env_vars.insert(name.to_string(), env_value(value));
                         }
                         _ => {
@@ -409,14 +409,12 @@ impl Shell {
 
     /// Load configuration
     fn load_config(&mut self) -> Result<()> {
-        // Try .winshrc first (legacy format), then .winshrc.toml
         let winshrc = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".winshrc");
         if winshrc.exists() {
             log::info!("Loading config: {}", winshrc.display());
             self.parse_config_file(&winshrc)?;
             log::info!("Config loaded successfully");
         } else {
-            // Fallback to TOML
             if let Some(config_path) = crate::config::ConfigManager::find_config_file() {
                 if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
                     let mut config_manager = crate::config::ConfigManager::new();
@@ -506,20 +504,17 @@ impl Shell {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let home_str = home_dir.display().to_string();
         let dir_display = if dir.starts_with(&home_str) {
-            if dir == home_str {
-                "~".to_string()
-            } else {
-                format!("~{}", &dir[home_str.len()..])
-            }
-        } else {
-            dir
-        };
+            if dir == home_str { "~".to_string() } else { format!("~{}", &dir[home_str.len()..]) }
+        } else { dir };
 
-        // Use theme plugin if available, otherwise use default colors
-        let prompt_text = if let ThemePlugin::Theme(ref theme) = self.theme_plugin {
+        // Check if PROMPT env var is set (oh-my-winuxsh theme)
+        let prompt_text = if let Some(ArrayValue::String(ref fmt)) = self.env_vars.get("PROMPT") {
+            self.render_prompt_template(fmt, &username, &hostname, &dir_display)
+        } else if let Some(ArrayValue::String(ref fmt)) = self.env_vars.get("PS1") {
+            self.render_prompt_template(fmt, &username, &hostname, &dir_display)
+        } else if let ThemePlugin::Theme(ref theme) = self.theme_plugin {
             theme.generate_prompt(&username, &hostname, &dir_display, "$ ")
         } else {
-            // Default colored prompt
             format!(
                 "\x1b[1;32m{}@{}\x1b[0m \x1b[1;34m{}\x1b[0m $ ",
                 username, hostname, dir_display
@@ -530,6 +525,70 @@ impl Shell {
             DefaultPromptSegment::Basic(prompt_text),
             DefaultPromptSegment::Empty,
         )
+    }
+
+    /// Render a zsh-style prompt template: %F{color}, %f, %n, %m, %~, %#, %T
+    fn render_prompt_template(&self, template: &str, user: &str, host: &str, dir: &str) -> String {
+        let mut result = String::new();
+        let mut chars = template.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                match chars.peek().copied() {
+                    Some('F') => {
+                        chars.next();
+                        if chars.peek() == Some(&'{') {
+                            chars.next();
+                            let mut color = String::new();
+                            while let Some(&cc) = chars.peek() {
+                                if cc == '}' { chars.next(); break; }
+                                color.push(chars.next().unwrap());
+                            }
+                            result.push_str(&self.ansi_fg(&color));
+                        }
+                    }
+                    Some('f') => { chars.next(); result.push_str("\x1b[39m"); }
+                    Some('n') => { chars.next(); result.push_str(user); }
+                    Some('m') => { chars.next(); result.push_str(host); }
+                    Some('~') => { chars.next(); result.push_str(dir); }
+                    Some('#') => { chars.next(); result.push('%'); } // always % for non-root
+                    Some('T') => {
+                        chars.next();
+                        use std::time::SystemTime;
+                        if let Ok(dur) = SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            let secs = dur.as_secs();
+                            let h = (secs / 3600) % 24;
+                            let m = (secs / 60) % 60;
+                            result.push_str(&format!("{:02}:{:02}", h, m));
+                        }
+                    }
+                    Some('?') => { chars.next(); result.push_str(&self.last_exit_code.to_string()); }
+                    Some(c2) => {
+                        chars.next();
+                        result.push('%');
+                        result.push(c2);
+                    }
+                    None => { result.push('%'); }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    fn ansi_fg(&self, color: &str) -> String {
+        match color.to_lowercase().as_str() {
+            "black" => "\x1b[30m".to_string(),
+            "red" => "\x1b[31m".to_string(),
+            "green" => "\x1b[32m".to_string(),
+            "yellow" => "\x1b[33m".to_string(),
+            "blue" => "\x1b[34m".to_string(),
+            "magenta" => "\x1b[35m".to_string(),
+            "cyan" => "\x1b[36m".to_string(),
+            "white" => "\x1b[37m".to_string(),
+            _ if color.parse::<u8>().is_ok() => format!("\x1b[38;5;{}m", color),
+            _ => String::new(),
+        }
     }
 
     /// Parse ANSI escape sequences from config format
@@ -1856,28 +1915,24 @@ fn expand_word(word: &Word, env_vars: &HashMap<String, String>) -> String {
         match part {
             WordPart::Literal(s) => result.push_str(s),
             WordPart::Variable(name) => {
-                result.push_str(env_vars.get(name).map(|s| s.as_str()).unwrap_or(""));
+                result.push_str(&std::env::var(name).unwrap_or_default());
             }
             WordPart::BracedVariable(spec) => {
-                // Simple expansion for ${VAR} - strip braces and expand
                 let var_name = spec.trim_matches(|c: char| c == '{' || c == '}');
-                if let Some(val) = env_vars.get(var_name) {
-                    result.push_str(val);
-                }
+                result.push_str(&std::env::var(var_name).unwrap_or_default());
             }
             WordPart::SingleQuoted(s) => result.push_str(s),
             WordPart::DollarQuoted(s) => result.push_str(s),
             WordPart::DoubleQuoted(inner) => {
-                // Recursively expand inner parts of double-quoted string
                 for p in inner {
                     match p {
                         WordPart::Literal(ref s) => result.push_str(s),
                         WordPart::Variable(ref name) => {
-                            result.push_str(env_vars.get(name.as_str()).map(|s| s.as_str()).unwrap_or(""));
+                            result.push_str(&std::env::var(name.as_str()).unwrap_or_default());
                         }
                         WordPart::BracedVariable(ref spec) => {
                             let var_name = spec.trim_matches(|c: char| c == '{' || c == '}');
-                            result.push_str(env_vars.get(var_name).unwrap_or(&String::new()));
+                            result.push_str(&std::env::var(var_name).unwrap_or_default());
                         }
                         _ => result.push_str(&p.to_string()),
                     }
